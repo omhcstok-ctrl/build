@@ -4,6 +4,12 @@ on:
   push:
     branches:
       - build
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type (flutter / web2apk)'
+        required: false
+        default: 'flutter'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -11,9 +17,23 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Debug - Repo structure
+        run: |
+          echo "=== Repo root ==="
+          ls -la
+          echo ""
+          echo "=== build-assets ==="
+          ls -la build-assets/ 2>/dev/null || echo "(no build-assets folder)"
+          echo ""
+          echo "=== build-config.json ==="
+          cat build-config.json 2>/dev/null || echo "(no build-config.json)"
+          echo ""
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -24,10 +44,12 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: Install dependencies (ImageMagick, jq, unzip, curl)
-        run: sudo apt-get update && sudo apt-get install -y imagemagick jq unzip curl
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y imagemagick jq unzip curl
 
-      - name: Install Gradle
+      - name: Install Gradle 8.9
         run: |
           curl -s "https://get.sdkman.io" | bash
           source "$HOME/.sdkman/bin/sdkman-init.sh"
@@ -37,27 +59,34 @@ jobs:
 
       - name: Read build config
         id: config
+        shell: bash
         run: |
           if [ -f build-config.json ]; then
-            echo "type=$(jq -r .type build-config.json)" >> $GITHUB_ENV
-            echo "url=$(jq -r .url build-config.json)" >> $GITHUB_ENV
-            echo "app_name=$(jq -r .app_name build-config.json)" >> $GITHUB_ENV
+            echo "type=$(jq -r .type build-config.json)"             >> $GITHUB_ENV
+            echo "url=$(jq -r .url build-config.json)"               >> $GITHUB_ENV
+            echo "app_name=$(jq -r .app_name build-config.json)"     >> $GITHUB_ENV
             echo "build_type=$(jq -r .build_type build-config.json)" >> $GITHUB_ENV
             cat build-config.json
           else
             echo "type=unknown" >> $GITHUB_ENV
           fi
 
-      - name: Generate keystore for signing (all builds)
+      - name: Generate keystore for signing
         run: |
-          keytool -genkey -v -keystore release.keystore -alias release -keyalg RSA -keysize 2048 -validity 10000 -storepass password -keypass password -dname "CN=BuildBot, OU=Dev, O=BuildBot, L=City, S=State, C=ID"
+          keytool -genkey -v -keystore release.keystore -alias release \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass password -keypass password \
+            -dname "CN=BuildBot, OU=Dev, O=BuildBot, L=City, S=State, C=ID"
 
-      # ---------- Web2APK ----------
+      # ═══════════════════════════════════════════════════════════════
+      #   WEB2APK
+      # ═══════════════════════════════════════════════════════════════
       - name: Web2APK - Create root gradle files
         if: env.type == 'web2apk'
+        shell: bash
         run: |
           mkdir -p project
-          cat > project/build.gradle <<EOF
+          cat > project/build.gradle <<'EOF'
           buildscript {
               repositories {
                   google()
@@ -77,7 +106,7 @@ jobs:
               delete rootProject.buildDir
           }
           EOF
-          cat > project/settings.gradle <<EOF
+          cat > project/settings.gradle <<'EOF'
           pluginManagement {
               repositories {
                   google()
@@ -94,7 +123,7 @@ jobs:
           rootProject.name = "MyApp"
           include ':app'
           EOF
-          cat > project/gradle.properties <<EOF
+          cat > project/gradle.properties <<'EOF'
           org.gradle.jvmargs=-Xmx2048m
           android.useAndroidX=true
           android.enableJetifier=true
@@ -102,9 +131,10 @@ jobs:
 
       - name: Web2APK - Create app/build.gradle
         if: env.type == 'web2apk'
+        shell: bash
         run: |
           mkdir -p project/app
-          cat > project/app/build.gradle <<EOF
+          cat > project/app/build.gradle <<'EOF'
           plugins {
               id 'com.android.application'
           }
@@ -154,11 +184,12 @@ jobs:
           }
           EOF
 
-      - name: Web2APK - Create Java source files
+      - name: Web2APK - Create Java sources
         if: env.type == 'web2apk'
+        shell: bash
         run: |
           mkdir -p project/app/src/main/java/com/web2apk/app
-          cat > project/app/src/main/java/com/web2apk/app/MainActivity.java <<EOF
+          cat > project/app/src/main/java/com/web2apk/app/MainActivity.java <<'EOF'
           package com.web2apk.app;
           import android.annotation.SuppressLint;
           import android.app.DownloadManager;
@@ -282,7 +313,7 @@ jobs:
               }
           }
           EOF
-          cat > project/app/src/main/java/com/web2apk/app/SplashActivity.java <<EOF
+          cat > project/app/src/main/java/com/web2apk/app/SplashActivity.java <<'EOF'
           package com.web2apk.app;
           import android.content.Intent;
           import android.os.Bundle;
@@ -303,12 +334,13 @@ jobs:
           }
           EOF
 
-      - name: Web2APK - Create AndroidManifest.xml and layouts
+      - name: Web2APK - Create manifest & layouts
         if: env.type == 'web2apk'
+        shell: bash
         run: |
           mkdir -p project/app/src/main/res/layout
           mkdir -p project/app/src/main/res/values
-          cat > project/app/src/main/AndroidManifest.xml <<EOF
+          cat > project/app/src/main/AndroidManifest.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.INTERNET" />
@@ -338,7 +370,7 @@ jobs:
               </application>
           </manifest>
           EOF
-          cat > project/app/src/main/res/layout/activity_main.xml <<EOF
+          cat > project/app/src/main/res/layout/activity_main.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
               xmlns:app="http://schemas.android.com/apk/res-auto"
@@ -368,7 +400,7 @@ jobs:
               </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
           </LinearLayout>
           EOF
-          cat > project/app/src/main/res/layout/activity_splash.xml <<EOF
+          cat > project/app/src/main/res/layout/activity_splash.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
               android:layout_width="match_parent"
@@ -402,7 +434,7 @@ jobs:
               </LinearLayout>
           </RelativeLayout>
           EOF
-          cat > project/app/src/main/res/values/colors.xml <<EOF
+          cat > project/app/src/main/res/values/colors.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
               <color name="colorPrimary">#000000</color>
@@ -412,14 +444,14 @@ jobs:
               <color name="black">#000000</color>
           </resources>
           EOF
-          cat > project/app/src/main/res/values/strings.xml <<EOF
+          cat > project/app/src/main/res/values/strings.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
               <string name="app_name">AppName</string>
               <string name="loading">Loading...</string>
           </resources>
           EOF
-          cat > project/app/src/main/res/values/styles.xml <<EOF
+          cat > project/app/src/main/res/values/styles.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
               <style name="AppTheme" parent="Theme.Material3.DayNight.NoActionBar">
@@ -434,31 +466,47 @@ jobs:
           </resources>
           EOF
 
-      - name: Web2APK - Apply URL, app name, icons, and keystore
+      - name: Web2APK - Apply URL, app name, icons, keystore
         if: env.type == 'web2apk'
+        shell: bash
         run: |
           sed -i "s|URL_PLACEHOLDER|${{ env.url }}|g" project/app/src/main/java/com/web2apk/app/MainActivity.java
           sed -i "s|<string name=\"app_name\">.*</string>|<string name=\"app_name\">${{ env.app_name }}</string>|g" project/app/src/main/res/values/strings.xml
-          if [ ! -f build-assets/icon.png ] || ! file build-assets/icon.png | grep -q PNG; then
-            echo "⚠️ Icon tidak valid, membuat default..."
-            convert -size 512x512 xc:blue build-assets/icon.png
+
+          # PASTIKAN folder build-assets ada
+          mkdir -p build-assets
+
+          if [ ! -f build-assets/icon.png ] || ! file build-assets/icon.png | grep -qE "PNG|JPEG|image"; then
+            echo "⚠️ Icon tidak valid, membuat default di /tmp..."
+            convert -size 512x512 xc:blue /tmp/default_icon.png || exit 0
+            cp /tmp/default_icon.png build-assets/icon.png
           fi
-          mkdir -p project/app/src/main/res/mipmap-hdpi project/app/src/main/res/mipmap-mdpi project/app/src/main/res/mipmap-xhdpi project/app/src/main/res/mipmap-xxhdpi project/app/src/main/res/mipmap-xxxhdpi
-          convert build-assets/icon.png -resize 72x72 project/app/src/main/res/mipmap-hdpi/ic_launcher.png
-          convert build-assets/icon.png -resize 48x48 project/app/src/main/res/mipmap-mdpi/ic_launcher.png
-          convert build-assets/icon.png -resize 96x96 project/app/src/main/res/mipmap-xhdpi/ic_launcher.png
+
+          mkdir -p project/app/src/main/res/mipmap-hdpi project/app/src/main/res/mipmap-mdpi \
+                   project/app/src/main/res/mipmap-xhdpi project/app/src/main/res/mipmap-xxhdpi \
+                   project/app/src/main/res/mipmap-xxxhdpi
+
+          convert build-assets/icon.png -resize 72x72   project/app/src/main/res/mipmap-hdpi/ic_launcher.png
+          convert build-assets/icon.png -resize 48x48   project/app/src/main/res/mipmap-mdpi/ic_launcher.png
+          convert build-assets/icon.png -resize 96x96   project/app/src/main/res/mipmap-xhdpi/ic_launcher.png
           convert build-assets/icon.png -resize 144x144 project/app/src/main/res/mipmap-xxhdpi/ic_launcher.png
           convert build-assets/icon.png -resize 192x192 project/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
-          cp project/app/src/main/res/mipmap-hdpi/ic_launcher.png project/app/src/main/res/mipmap-hdpi/ic_launcher_round.png
-          cp project/app/src/main/res/mipmap-mdpi/ic_launcher.png project/app/src/main/res/mipmap-mdpi/ic_launcher_round.png
-          cp project/app/src/main/res/mipmap-xhdpi/ic_launcher.png project/app/src/main/res/mipmap-xhdpi/ic_launcher_round.png
-          cp project/app/src/main/res/mipmap-xxhdpi/ic_launcher.png project/app/src/main/res/mipmap-xxhdpi/ic_launcher_round.png
+
+          cp project/app/src/main/res/mipmap-hdpi/ic_launcher.png    project/app/src/main/res/mipmap-hdpi/ic_launcher_round.png
+          cp project/app/src/main/res/mipmap-mdpi/ic_launcher.png    project/app/src/main/res/mipmap-mdpi/ic_launcher_round.png
+          cp project/app/src/main/res/mipmap-xhdpi/ic_launcher.png   project/app/src/main/res/mipmap-xhdpi/ic_launcher_round.png
+          cp project/app/src/main/res/mipmap-xxhdpi/ic_launcher.png  project/app/src/main/res/mipmap-xxhdpi/ic_launcher_round.png
           cp project/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png project/app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png
+
           rm -f project/app/debug.keystore
-          keytool -genkey -v -keystore project/app/debug.keystore -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=Android Debug, O=Android, C=US"
+          keytool -genkey -v -keystore project/app/debug.keystore -alias androiddebugkey \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass android -keypass android \
+            -dname "CN=Android Debug, O=Android, C=US"
 
       - name: Web2APK - Build
         if: env.type == 'web2apk'
+        shell: bash
         run: |
           cd project
           source "$HOME/.sdkman/bin/sdkman-init.sh"
@@ -466,26 +514,27 @@ jobs:
 
       - name: Web2APK - Sign APK
         if: env.type == 'web2apk'
+        shell: bash
         run: |
           APK_PATH=$(find project/app/build/outputs/apk/release -name "*.apk" | head -n 1)
           if [ -f "$APK_PATH" ]; then
-            echo "Menandatangani Web2APK APK: $APK_PATH"
-            $ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools | sort -V | tail -n1)/apksigner sign --ks release.keystore --ks-pass pass:password --key-pass pass:password "$APK_PATH"
-            echo "Verifikasi tanda tangan Web2APK:"
+            echo "Signing Web2APK: $APK_PATH"
+            $ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools | sort -V | tail -n1)/apksigner sign \
+              --ks release.keystore --ks-pass pass:password --key-pass pass:password "$APK_PATH"
             $ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools | sort -V | tail -n1)/apksigner verify "$APK_PATH"
-          else
-            echo "APK Web2APK tidak ditemukan, skip signing"
           fi
 
-      # ---------- FLUTTER ----------
+      # ═══════════════════════════════════════════════════════════════
+      #   FLUTTER
+      # ═══════════════════════════════════════════════════════════════
       - name: Prepare Flutter project
         if: env.type == 'flutter'
+        shell: bash
         run: |
           rm -rf flutter-project
           mkdir -p flutter-project
           unzip -q flutter-project.zip -d flutter-project
 
-          # Ratakan jika zip berisi satu folder utama
           FIRST_DIR=$(find flutter-project -mindepth 1 -maxdepth 1 -type d | head -n 1)
           ROOT_FILES=$(find flutter-project -mindepth 1 -maxdepth 1 | wc -l)
 
@@ -498,59 +547,184 @@ jobs:
           fi
 
           if [ ! -f flutter-project/pubspec.yaml ]; then
-            echo "pubspec.yaml tidak ditemukan"
+            echo "❌ pubspec.yaml tidak ditemukan"
             exit 1
           fi
 
-      # STEP BARU: Generate icon untuk Flutter
-      - name: Generate Flutter app icons
+          echo "✅ Flutter project ready"
+          ls -la flutter-project/ | head -20
+
+      # ═══════════════════════════════════════════════════════════════
+      #   AUTO-DETECT & GENERATE FLUTTER ICONS
+      #   Prioritas:
+      #     1. flutter_launcher_icons di pubspec  → SKIP
+      #     2. ic_launcher.png di mipmap-*        → SKIP
+      #     3. icon.png / logo.png di project     → Generate
+      #     4. Icon dari bot (build-assets)       → Generate
+      #     5. Tidak ada apapun                   → SKIP (pakai default)
+      # ═══════════════════════════════════════════════════════════════
+      - name: Auto-detect & generate Flutter icons
         if: env.type == 'flutter'
+        shell: bash
         run: |
           cd flutter-project
-          mkdir -p android/app/src/main/res
+          echo "═══════════════════════════════════════════════════════"
+          echo "  🔍 AUTO-DETECT ICON"
+          echo "═══════════════════════════════════════════════════════"
 
-          # Cek apakah ada icon di build-assets (dari repo)
-          if [ -f ../build-assets/icon.png ] && file ../build-assets/icon.png | grep -q PNG; then
-            echo "✅ Menggunakan icon dari build-assets/icon.png"
-            ICON_SRC="../build-assets/icon.png"
-          else
-            echo "⚠️ Icon tidak ditemukan atau tidak valid, membuat default biru..."
-            convert -size 512x512 xc:blue ../build-assets/icon.png
-            ICON_SRC="../build-assets/icon.png"
+          # ─── PRIORITAS 1: flutter_launcher_icons ─────────────────
+          if grep -q "flutter_launcher_icons" pubspec.yaml 2>/dev/null; then
+            echo "✅ [PRIORITAS 1] User pakai flutter_launcher_icons"
+            echo "   → SKIP. Icon akan di-generate otomatis oleh flutter_launcher_icons."
+            exit 0
           fi
 
-          # Generate semua ukuran icon ke folder mipmap
+          # ─── PRIORITAS 2: Custom icon di mipmap-* ─────────────────
+          HAS_NATIVE_ICON=false
           for dir in mipmap-hdpi mipmap-mdpi mipmap-xhdpi mipmap-xxhdpi mipmap-xxxhdpi; do
-            mkdir -p android/app/src/main/res/$dir
+            for name in ic_launcher.png ic_launcher_foreground.png icon.png; do
+              P="android/app/src/main/res/$dir/$name"
+              if [ -f "$P" ]; then
+                SIZE=$(stat -c%s "$P" 2>/dev/null || echo 0)
+                if [ "$SIZE" -gt 100 ]; then
+                  echo "✅ [PRIORITAS 2] Custom native icon: $P ($SIZE bytes)"
+                  HAS_NATIVE_ICON=true
+                  break 2
+                fi
+              fi
+            done
+          done
+          if [ "$HAS_NATIVE_ICON" = "true" ]; then
+            echo "   → SKIP. Icon original user TIDAK akan di-override."
+            exit 0
+          fi
+
+          # ─── PRIORITAS 3: Cari icon.png / logo.png standar developer ──
+          ICON_SRC=""
+          CANDIDATES=(
+            # ─── PALING UMUM ───
+            "assets/icon.png"
+            "assets/logo.png"
+            "assets/images/icon.png"
+            "assets/images/logo.png"
+            "assets/icons/icon.png"
+            "assets/icons/logo.png"
+            "assets/icon/icon.png"
+            "assets/icon/logo.png"
+            "assets/img/icon.png"
+            "assets/img/logo.png"
+            "assets/image/icon.png"
+            "assets/image/logo.png"
+            # ─── DI ROOT PROJECT ───
+            "icon.png"
+            "logo.png"
+            # ─── NAMA LAIN ───
+            "assets/app_icon.png"
+            "assets/launcher_icon.png"
+            "assets/icon/app_icon.png"
+            "assets/icons/app_icon.png"
+            # ─── ANDROID DRAWABLE ───
+            "android/app/src/main/res/drawable/icon.png"
+            "android/app/src/main/res/drawable/logo.png"
+            "android/app/src/main/res/drawable/app_icon.png"
+          )
+
+          for candidate in "${CANDIDATES[@]}"; do
+            if [ -f "$candidate" ]; then
+              if file "$candidate" | grep -qE "PNG|JPEG|image"; then
+                echo "✅ [PRIORITAS 3] Icon ditemukan: $candidate"
+                ICON_SRC="$candidate"
+                break
+              fi
+            fi
           done
 
-          convert $ICON_SRC -resize 72x72 android/app/src/main/res/mipmap-hdpi/ic_launcher.png
-          convert $ICON_SRC -resize 48x48 android/app/src/main/res/mipmap-mdpi/ic_launcher.png
-          convert $ICON_SRC -resize 96x96 android/app/src/main/res/mipmap-xhdpi/ic_launcher.png
-          convert $ICON_SRC -resize 144x144 android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png
-          convert $ICON_SRC -resize 192x192 android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+          # ─── PRIORITAS 3b: Auto-cari di assets/ ──────────────────
+          if [ -z "$ICON_SRC" ] && [ -d "assets" ]; then
+            echo "🔍 Cari otomatis PNG di assets/..."
+            AUTO=$(find assets -type f \( -name "icon.png" -o -name "logo.png" \) 2>/dev/null | head -1)
+            if [ -z "$AUTO" ]; then
+              AUTO=$(find assets -type f \( -iname "*icon*.png" -o -iname "*logo*.png" \) 2>/dev/null | head -1)
+            fi
+            if [ -n "$AUTO" ]; then
+              echo "✅ [PRIORITAS 3b] Auto-detect: $AUTO"
+              ICON_SRC="$AUTO"
+            fi
+          fi
 
-          # Buat round icon (copy saja)
-          cp android/app/src/main/res/mipmap-hdpi/ic_launcher.png android/app/src/main/res/mipmap-hdpi/ic_launcher_round.png
-          cp android/app/src/main/res/mipmap-mdpi/ic_launcher.png android/app/src/main/res/mipmap-mdpi/ic_launcher_round.png
-          cp android/app/src/main/res/mipmap-xhdpi/ic_launcher.png android/app/src/main/res/mipmap-xhdpi/ic_launcher_round.png
-          cp android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png android/app/src/main/res/mipmap-xxhdpi/ic_launcher_round.png
-          cp android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png android/app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png
+          # ─── PRIORITAS 3c: Cari icon.png di root project ─────────
+          if [ -z "$ICON_SRC" ]; then
+            AUTO=$(find . -maxdepth 2 -type f \( -name "icon.png" -o -name "logo.png" \) 2>/dev/null | head -1)
+            if [ -n "$AUTO" ]; then
+              echo "✅ [PRIORITAS 3c] Auto-detect di root: $AUTO"
+              ICON_SRC="$AUTO"
+            fi
+          fi
 
-          echo "✅ Icons Flutter berhasil digenerate"
+          # ─── PRIORITAS 4: Icon dari bot ──────────────────────────
+          if [ -z "$ICON_SRC" ] && [ -f "../build-assets/icon.png" ]; then
+            if file ../build-assets/icon.png | grep -qE "PNG|JPEG|image"; then
+              echo "✅ [PRIORITAS 4] Icon dari bot: build-assets/icon.png"
+              ICON_SRC="../build-assets/icon.png"
+            fi
+          fi
 
-      - name: Fix Flutter Android configuration (compileSdk 36 & signing)
+          # ─── PRIORITAS 5: Tidak ada icon ─────────────────────────
+          if [ -z "$ICON_SRC" ]; then
+            echo "ℹ️  [PRIORITAS 5] Tidak ada icon yang ditemukan."
+            echo "   → SKIP. Build akan pakai icon default Flutter template."
+            echo "   → Tips: taruh icon kamu di assets/icon.png (512x512 atau 1024x1024)"
+            exit 0
+          fi
+
+          # ─── GENERATE ICON ───────────────────────────────────────
+          echo ""
+          echo "═══════════════════════════════════════════════════════"
+          echo "  🎨 GENERATE ICON dari: $ICON_SRC"
+          echo "═══════════════════════════════════════════════════════"
+
+          for dir in mipmap-hdpi mipmap-mdpi mipmap-xhdpi mipmap-xxhdpi mipmap-xxxhdpi; do
+            mkdir -p "android/app/src/main/res/$dir"
+          done
+
+          generate_icon() {
+            local size=$1
+            local dest=$2
+            if ! convert "$ICON_SRC" -resize "${size}x${size}" "$dest" 2>/dev/null; then
+              echo "⚠️ Gagal generate $dest, retry dengan -background none..."
+              convert "$ICON_SRC" -background none -resize "${size}x${size}" "$dest" 2>/dev/null || {
+                echo "❌ Gagal total untuk $dest"
+                return 1
+              }
+            fi
+            echo "   ✔ $dest ($(stat -c%s "$dest" 2>/dev/null || echo 0) bytes)"
+          }
+
+          generate_icon 72  "android/app/src/main/res/mipmap-hdpi/ic_launcher.png"
+          generate_icon 48  "android/app/src/main/res/mipmap-mdpi/ic_launcher.png"
+          generate_icon 96  "android/app/src/main/res/mipmap-xhdpi/ic_launcher.png"
+          generate_icon 144 "android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png"
+          generate_icon 192 "android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png"
+
+          for dir in mipmap-hdpi mipmap-mdpi mipmap-xhdpi mipmap-xxhdpi mipmap-xxxhdpi; do
+            SRC="android/app/src/main/res/$dir/ic_launcher.png"
+            DST="android/app/src/main/res/$dir/ic_launcher_round.png"
+            [ -f "$SRC" ] && cp "$SRC" "$DST"
+          done
+
+          echo ""
+          echo "✅ SEMUA ICON BERHASIL DI-GENERATE dari: $ICON_SRC"
+
+      - name: Fix Flutter Android config
         if: env.type == 'flutter'
+        shell: bash
         run: |
           cd flutter-project/android/app
-          # Salin keystore
           cp ../../../release.keystore .
 
-          # Perbaiki compileSdk dan targetSdk ke 36
           if [ -f build.gradle ]; then
             sed -i 's/compileSdk [0-9]*/compileSdk 36/g' build.gradle
             sed -i 's/targetSdk [0-9]*/targetSdk 36/g' build.gradle
-            # Signing config
             sed -i 's|storeFile file(".*")|storeFile file("release.keystore")|g' build.gradle
             sed -i 's|storePassword ".*"|storePassword "password"|g' build.gradle
             sed -i 's|keyAlias ".*"|keyAlias "release"|g' build.gradle
@@ -566,9 +740,6 @@ jobs:
             sed -i 's|keyAlias.set(".*")|keyAlias.set("release")|g' build.gradle.kts
             sed -i 's|keyPassword = ".*"|keyPassword = "password"|g' build.gradle.kts
             sed -i 's|keyPassword.set(".*")|keyPassword.set("password")|g' build.gradle.kts
-          else
-            echo "Tidak ditemukan build.gradle atau build.gradle.kts"
-            exit 1
           fi
 
       - name: Detect Flutter version from pubspec
@@ -578,17 +749,11 @@ jobs:
         run: |
           set -e
           PUBSPEC="flutter-project/pubspec.yaml"
-
-          SDK_LINE=$(grep -A2 '^environment:' "$PUBSPEC" | grep 'sdk:' | head -n1 | sed 's/.*sdk:[[:space:]]*//; s/["\'\'']//g' || true)
+          SDK_LINE=$(grep -A2 '^environment:' "$PUBSPEC" | grep 'sdk:' | head -n1 | sed 's/.*sdk:[[:space:]]*//; s/["'\'']//g' || true)
           echo "Detected SDK constraint: $SDK_LINE"
 
           FLUTTER_VERSION="3.27.0"
-
-          get_dart_version() {
-            echo "$1" | grep -oE '[0-9]+\.[0-9]+' | head -n1
-          }
-
-          DART_VERSION=$(get_dart_version "$SDK_LINE")
+          DART_VERSION=$(echo "$SDK_LINE" | grep -oE '[0-9]+\.[0-9]+' | head -n1)
           echo "Extracted Dart version: $DART_VERSION"
 
           if [ -n "$DART_VERSION" ]; then
@@ -609,47 +774,37 @@ jobs:
               "3.2"*)  FLUTTER_VERSION="3.16.0" ;;
               "3.1"*)  FLUTTER_VERSION="3.13.0" ;;
               "3.0"*)  FLUTTER_VERSION="3.10.0" ;;
-              *)       FLUTTER_VERSION="3.27.0" ;;
             esac
           fi
 
-          # Override berdasarkan plugin tertentu
           if grep -Eq 'webview_flutter:[[:space:]]*(\^|>=)?4\.(1[5-9]|[2-9][0-9])' "$PUBSPEC" || \
              grep -Eq 'webview_flutter:[[:space:]]*(\^|>=)?5\.' "$PUBSPEC"; then
             FLUTTER_VERSION="3.35.2"
           fi
-
           if grep -Eq 'geolocator:[[:space:]]*(\^|>=)?14\.' "$PUBSPEC" || \
              grep -Eq 'geolocator:[[:space:]]*(\^|>=)?15\.' "$PUBSPEC"; then
             FLUTTER_VERSION="3.35.2"
           fi
-
           if grep -Eq 'google_maps_flutter:[[:space:]]*(\^|>=)?2\.(1[0-9]|[2-9][0-9])' "$PUBSPEC" || \
              grep -Eq 'google_maps_flutter:[[:space:]]*(\^|>=)?3\.' "$PUBSPEC"; then
             FLUTTER_VERSION="3.35.2"
           fi
-
           if grep -Eq 'firebase_core:[[:space:]]*(\^|>=)?3\.' "$PUBSPEC" || \
              grep -Eq 'firebase_[a-z_]+:[[:space:]]*(\^|>=)?3\.' "$PUBSPEC"; then
             FLUTTER_VERSION="3.35.2"
           fi
-
           if grep -Eq 'flutter_local_notifications:[[:space:]]*(\^|>=)?17\.' "$PUBSPEC"; then
             FLUTTER_VERSION="3.35.2"
           fi
-
           if grep -Eq 'workmanager:[[:space:]]*(\^|>=)?0\.(6|[7-9])' "$PUBSPEC"; then
             FLUTTER_VERSION="3.35.2"
           fi
-
           if grep -Eq 'image_picker:[[:space:]]*(\^|>=)?1\.(2[0-9]|[3-9][0-9])' "$PUBSPEC"; then
             FLUTTER_VERSION="3.35.2"
           fi
-
           if grep -Eq 'file_picker:[[:space:]]*(\^|>=)?8\.' "$PUBSPEC"; then
             FLUTTER_VERSION="3.35.2"
           fi
-
           if grep -Eq 'permission_handler:[[:space:]]*(\^|>=)?12\.' "$PUBSPEC"; then
             FLUTTER_VERSION="3.35.2"
           fi
@@ -666,7 +821,7 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Build Flutter APK with auto-detection and auto-fix
+      - name: Build Flutter APK with auto-fix
         if: env.type == 'flutter'
         shell: bash
         run: |
@@ -682,20 +837,16 @@ jobs:
           RETRY_COUNT=0
           SUCCESS=false
 
-          # Fungsi perbaikan kode (tidak menyebabkan exit)
           fix_code_issues() {
             echo "=== Auto-fixing code issues ==="
             local CHANGED=0
 
-            # 1. Tambahkan dependency http jika belum ada
             if ! grep -q "^  http:" pubspec.yaml; then
-              echo "Menambahkan dependency http ke pubspec.yaml"
+              echo "Menambahkan dependency http"
               sed -i '/dependencies:/a \ \ http: ^1.2.0' pubspec.yaml
               CHANGED=1
             fi
 
-            # 2. Cari file yang pakai http. dan tambahkan import jika perlu
-            # Gunakan while read untuk menangani spasi
             grep -rl "http\.[a-zA-Z]" lib/ --include="*.dart" 2>/dev/null | while IFS= read -r FILE; do
               if [ -f "$FILE" ] && ! grep -q "import.*http" "$FILE"; then
                 echo "Menambahkan import http ke $FILE"
@@ -704,79 +855,55 @@ jobs:
               fi
             done
 
-            # Simpan flag ke file agar bisa dibaca di luar fungsi
             echo "$CHANGED" > /tmp/changed_flag
           }
 
-          # Fungsi perbaikan pubspec (plugin version)
           auto_fix_pubspec() {
             local FIXED=false
             echo "=== Auto-fixing pubspec.yaml ==="
 
             if grep -q "requires SDK version" "$PUB_LOG" || grep -q "requires Dart SDK version" "$PUB_LOG"; then
-              echo "Fix: Menurunkan SDK constraint"
               sed -i -E "s/sdk:[[:space:]]*['\"]?[\^>=]*3\.[0-9]+(\.[0-9]+)?['\"]?/sdk: \">=3.6.0 <4.0.0\"/g" pubspec.yaml || true
               sed -i -E "s/sdk:[[:space:]]*['\"]?[\^>=]*3\.[0-9]+['\"]?/sdk: \">=3.6.0 <4.0.0\"/g" pubspec.yaml || true
               FIXED=true
             fi
-
             if grep -q "webview_flutter" "$PUB_LOG" && grep -q "requires SDK version" "$PUB_LOG"; then
-              echo "Fix: Menurunkan webview_flutter ke 4.13.0"
               sed -i -E "s/webview_flutter:[[:space:]]*['\"]?[^'\"]+['\"]?/webview_flutter: ^4.13.0/g" pubspec.yaml || true
               FIXED=true
             fi
-
             if grep -q "geolocator" "$PUB_LOG" && (grep -q "toARGB32" "$PUB_LOG" || grep -q "geolocator_android" "$PUB_LOG"); then
-              echo "Fix: Menurunkan geolocator ke 13.0.4"
               sed -i -E "s/geolocator:[[:space:]]*['\"]?[^'\"]+['\"]?/geolocator: ^13.0.4/g" pubspec.yaml || true
               FIXED=true
             fi
-
             if grep -q "google_maps_flutter" "$PUB_LOG" && grep -q "requires SDK version" "$PUB_LOG"; then
-              echo "Fix: Menurunkan google_maps_flutter"
               sed -i -E "s/google_maps_flutter:[[:space:]]*['\"]?[^'\"]+['\"]?/google_maps_flutter: ^2.9.0/g" pubspec.yaml || true
               FIXED=true
             fi
-
             if grep -q "permission_handler" "$PUB_LOG" && grep -q "requires SDK version" "$PUB_LOG"; then
-              echo "Fix: Menurunkan permission_handler"
               sed -i -E "s/permission_handler:[[:space:]]*['\"]?[^'\"]+['\"]?/permission_handler: ^11.3.1/g" pubspec.yaml || true
               FIXED=true
             fi
-
             if grep -q "firebase_core" "$PUB_LOG" && grep -q "requires SDK version" "$PUB_LOG"; then
-              echo "Fix: Menurunkan firebase_core"
               sed -i -E "s/firebase_core:[[:space:]]*['\"]?[^'\"]+['\"]?/firebase_core: ^2.32.0/g" pubspec.yaml || true
-              sed -i -E "s/firebase_[a-z_]+:[[:space:]]*['\"]?[^'\"]+['\"]?/firebase_\1: ^2.32.0/g" pubspec.yaml || true
               FIXED=true
             fi
-
             if grep -q "file_picker" "$PUB_LOG" && grep -q "requires SDK version" "$PUB_LOG"; then
-              echo "Fix: Menurunkan file_picker"
               sed -i -E "s/file_picker:[[:space:]]*['\"]?[^'\"]+['\"]?/file_picker: ^6.2.1/g" pubspec.yaml || true
               FIXED=true
             fi
-
             if grep -q "image_picker" "$PUB_LOG" && grep -q "requires SDK version" "$PUB_LOG"; then
-              echo "Fix: Menurunkan image_picker"
               sed -i -E "s/image_picker:[[:space:]]*['\"]?[^'\"]+['\"]?/image_picker: ^1.1.2/g" pubspec.yaml || true
               FIXED=true
             fi
-
             if grep -q "flutter_local_notifications" "$PUB_LOG" && grep -q "requires SDK version" "$PUB_LOG"; then
-              echo "Fix: Menurunkan flutter_local_notifications"
               sed -i -E "s/flutter_local_notifications:[[:space:]]*['\"]?[^'\"]+['\"]?/flutter_local_notifications: ^17.2.4/g" pubspec.yaml || true
               FIXED=true
             fi
-
             if grep -q "workmanager" "$PUB_LOG" && grep -q "requires SDK version" "$PUB_LOG"; then
-              echo "Fix: Menurunkan workmanager"
               sed -i -E "s/workmanager:[[:space:]]*['\"]?[^'\"]+['\"]?/workmanager: ^0.5.2/g" pubspec.yaml || true
               FIXED=true
             fi
-
             if grep -q "overrides" "$PUB_LOG"; then
-              echo "Fix: Menangani dependency overrides"
               sed -i '/^dependency_overrides:/,/^[^ ]/d' pubspec.yaml || true
               FIXED=true
             fi
@@ -784,8 +911,6 @@ jobs:
             if [ "$FIXED" = true ]; then
               echo "✅ Pubspec telah di-fix"
               rm -f pubspec.lock
-            else
-              echo "ℹ️ Tidak ada perbaikan yang diperlukan"
             fi
           }
 
@@ -800,14 +925,10 @@ jobs:
 
             if try_pub_get; then
               echo "✅ flutter pub get succeeded"
-
-              # Jalankan perbaikan kode tanpa menyebabkan exit
               set +e
               fix_code_issues
-              FIX_EXIT=$?
               set -e
 
-              # Baca flag perubahan dari file
               if [ -f /tmp/changed_flag ]; then
                 CHANGED=$(cat /tmp/changed_flag)
                 rm -f /tmp/changed_flag
@@ -816,15 +937,13 @@ jobs:
               fi
 
               if [ $CHANGED -eq 1 ]; then
-                echo "Kode telah diperbaiki, jalankan pub get lagi..."
+                echo "Kode diperbaiki, jalankan pub get lagi..."
                 if ! flutter pub get; then
-                  echo "❌ pub get gagal setelah perbaikan kode"
-                  # Lanjut ke retry berikutnya
+                  echo "❌ pub get gagal setelah perbaikan"
                   continue
                 fi
               fi
 
-              # Build
               if [ "$BUILD_MODE" = "release" ]; then
                 if flutter build apk --release; then
                   SUCCESS=true
@@ -855,24 +974,26 @@ jobs:
 
           if [ "$SUCCESS" = false ]; then
             echo "❌ Build failed after $MAX_RETRIES attempts"
-            echo "Last pub get output:"
             cat "$PUB_LOG" || true
             exit 1
           fi
 
       - name: Verify Flutter APK signature
         if: env.type == 'flutter' && env.build_type == 'release'
+        shell: bash
         run: |
           APK_PATH=$(find flutter-project/build/app/outputs/flutter-apk -name "*.apk" | head -n 1)
           if [ -f "$APK_PATH" ]; then
-            echo "Verifikasi tanda tangan Flutter Release:"
+            echo "Verifikasi tanda tangan:"
             $ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools | sort -V | tail -n1)/apksigner verify "$APK_PATH"
           else
-            echo "APK Flutter release tidak ditemukan"
+            echo "APK tidak ditemukan"
             exit 1
           fi
 
-      # ---------- UPLOAD ----------
+      # ═══════════════════════════════════════════════════════════════
+      #   UPLOAD ARTIFACT
+      # ═══════════════════════════════════════════════════════════════
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
@@ -881,3 +1002,4 @@ jobs:
             project/app/build/outputs/apk/release/*.apk
             flutter-project/build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
+          retention-days: 1
