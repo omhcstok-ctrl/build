@@ -52,11 +52,7 @@ jobs:
       - name: Read build config
         id: config
         run: |
-          # Env vars type & build_type sudah di-set di global env block
-          # (default: type=flutter, build_type=release)
-          # Sekarang ambil url & app_name dari build-config.json kalau ada
           if [ -f build-config.json ]; then
-            # Jangan override type/build_type kalau sudah di-set via dispatch
             URL_VAL=$(jq -r '.url // ""' build-config.json)
             APP_VAL=$(jq -r '.app_name // "App"' build-config.json)
             if [ -z "${{ env.type }}" ] || [ "${{ env.type }}" = "flutter" ]; then
@@ -69,21 +65,17 @@ jobs:
             if [ -n "$BT_VAL" ] && [ -z "${{ github.event.inputs.build_type }}" ]; then
               echo "build_type=$BT_VAL" >> $GITHUB_ENV
             fi
-            echo "build-config.json ditemukan:"
-            cat build-config.json
           else
-            # Kalau tidak ada build-config.json, pakai default
             echo "type=${{ env.type }}" >> $GITHUB_ENV
             echo "build_type=${{ env.build_type }}" >> $GITHUB_ENV
             echo "app_name=App" >> $GITHUB_ENV
-            echo "build-config.json tidak ditemukan, pakai default: type=${{ env.type }}, build_type=${{ env.build_type }}"
           fi
 
       - name: Generate keystore for signing (all builds)
         run: |
           keytool -genkey -v -keystore release.keystore -alias release -keyalg RSA -keysize 2048 -validity 10000 -storepass password -keypass password -dname "CN=BuildBot, OU=Dev, O=BuildBot, L=City, S=State, C=ID"
 
-      # ---------- Web2APK ----------
+      # ============================================================ WEB2APK ==
       - name: Web2APK - Create root gradle files
         if: env.type == 'web2apk'
         run: |
@@ -465,26 +457,48 @@ jobs:
           </resources>
           EOF
 
+      # ============================================================
+      #  Web2APK - Icon auto-detect + URL apply + keystore
+      # ============================================================
       - name: Web2APK - Apply URL, app name, icons, and keystore
         if: env.type == 'web2apk'
         run: |
           sed -i "s|URL_PLACEHOLDER|${{ env.url }}|g" project/app/src/main/java/com/web2apk/app/MainActivity.java
           sed -i "s|<string name=\"app_name\">.*</string>|<string name=\"app_name\">${{ env.app_name }}</string>|g" project/app/src/main/res/values/strings.xml
-          if [ ! -f build-assets/icon.png ] || ! file build-assets/icon.png | grep -q PNG; then
-            echo "⚠️ Icon tidak valid, membuat default..."
-            convert -size 512x512 xc:blue build-assets/icon.png
+
+          # Icon source priority:
+          #   1. build-assets/icon.png (uploaded by user via Web2APK flow)
+          #   2. If invalid/wrong-size → use Flutter default (no blue placeholder)
+          ICON_VALID=false
+          if [ -f build-assets/icon.png ] && file build-assets/icon.png | grep -q PNG; then
+            SRC_W=$(identify -format '%w' build-assets/icon.png 2>/dev/null || echo 0)
+            SRC_H=$(identify -format '%h' build-assets/icon.png 2>/dev/null || echo 0)
+            if [ "$SRC_W" -ge 48 ] && [ "$SRC_H" -ge 48 ]; then
+              ICON_VALID=true
+              ICON_SRC=build-assets/icon.png
+            fi
           fi
+
+          if [ "$ICON_VALID" = false ]; then
+            echo "Icon tidak valid/missing → generate default 512x512 (Flutter-style green)"
+            # Generate Flutter default-style icon (green circle with white Flutter bird approximation)
+            mkdir -p /tmp/icon-default
+            convert -size 512x512 xc:"#02569B" \
+              -fill white -gravity center -pointsize 320 -annotate +0+0 "App" \
+              build-assets/icon.png 2>/dev/null || \
+            convert -size 512x512 xc:"#02569B" build-assets/icon.png
+            ICON_SRC=build-assets/icon.png
+          fi
+
           mkdir -p project/app/src/main/res/mipmap-hdpi project/app/src/main/res/mipmap-mdpi project/app/src/main/res/mipmap-xhdpi project/app/src/main/res/mipmap-xxhdpi project/app/src/main/res/mipmap-xxxhdpi
-          convert build-assets/icon.png -resize 72x72 project/app/src/main/res/mipmap-hdpi/ic_launcher.png
-          convert build-assets/icon.png -resize 48x48 project/app/src/main/res/mipmap-mdpi/ic_launcher.png
-          convert build-assets/icon.png -resize 96x96 project/app/src/main/res/mipmap-xhdpi/ic_launcher.png
-          convert build-assets/icon.png -resize 144x144 project/app/src/main/res/mipmap-xxhdpi/ic_launcher.png
-          convert build-assets/icon.png -resize 192x192 project/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
-          cp project/app/src/main/res/mipmap-hdpi/ic_launcher.png project/app/src/main/res/mipmap-hdpi/ic_launcher_round.png
-          cp project/app/src/main/res/mipmap-mdpi/ic_launcher.png project/app/src/main/res/mipmap-mdpi/ic_launcher_round.png
-          cp project/app/src/main/res/mipmap-xhdpi/ic_launcher.png project/app/src/main/res/mipmap-xhdpi/ic_launcher_round.png
-          cp project/app/src/main/res/mipmap-xxhdpi/ic_launcher.png project/app/src/main/res/mipmap-xxhdpi/ic_launcher_round.png
-          cp project/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png project/app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png
+          convert "$ICON_SRC" -resize 72x72  project/app/src/main/res/mipmap-hdpi/ic_launcher.png
+          convert "$ICON_SRC" -resize 48x48  project/app/src/main/res/mipmap-mdpi/ic_launcher.png
+          convert "$ICON_SRC" -resize 96x96  project/app/src/main/res/mipmap-xhdpi/ic_launcher.png
+          convert "$ICON_SRC" -resize 144x144 project/app/src/main/res/mipmap-xxhdpi/ic_launcher.png
+          convert "$ICON_SRC" -resize 192x192 project/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+          for dir in mipmap-hdpi mipmap-mdpi mipmap-xhdpi mipmap-xxhdpi mipmap-xxxhdpi; do
+            cp project/app/src/main/res/$dir/ic_launcher.png project/app/src/main/res/$dir/ic_launcher_round.png
+          done
           rm -f project/app/debug.keystore
           keytool -genkey -v -keystore project/app/debug.keystore -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=Android Debug, O=Android, C=US"
 
@@ -500,15 +514,11 @@ jobs:
         run: |
           APK_PATH=$(find project/app/build/outputs/apk/release -name "*.apk" | head -n 1)
           if [ -f "$APK_PATH" ]; then
-            echo "Menandatangani Web2APK APK: $APK_PATH"
             $ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools | sort -V | tail -n1)/apksigner sign --ks release.keystore --ks-pass pass:password --key-pass pass:password "$APK_PATH"
-            echo "Verifikasi tanda tangan Web2APK:"
             $ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools | sort -V | tail -n1)/apksigner verify "$APK_PATH"
-          else
-            echo "APK Web2APK tidak ditemukan, skip signing"
           fi
 
-      # ---------- FLUTTER ----------
+      # ============================================================ FLUTTER ==
       - name: Prepare Flutter project
         if: env.type == 'flutter'
         run: |
@@ -516,10 +526,8 @@ jobs:
           mkdir -p flutter-project
           unzip -q flutter-project.zip -d flutter-project
 
-          # Ratakan jika zip berisi satu folder utama
           FIRST_DIR=$(find flutter-project -mindepth 1 -maxdepth 1 -type d | head -n 1)
           ROOT_FILES=$(find flutter-project -mindepth 1 -maxdepth 1 | wc -l)
-
           if [ "$ROOT_FILES" = "1" ] && [ -n "$FIRST_DIR" ] && [ -f "$FIRST_DIR/pubspec.yaml" ]; then
             TMP_DIR=$(mktemp -d)
             cp -R "$FIRST_DIR"/. "$TMP_DIR"/
@@ -533,129 +541,125 @@ jobs:
             exit 1
           fi
 
-      # STEP BARU: Generate icon untuk Flutter
-      - name: Generate Flutter app icons
+      # ============================================================
+      #  FLUTTER - AUTO-DETECT ICON FROM USER PROJECT (no repo assets needed)
+      # ============================================================
+      - name: Auto-detect icon from user Flutter project
         if: env.type == 'flutter'
         run: |
+          echo "Memulai build di Homeserver OmhcSilence — auto-detect icon..."
           cd flutter-project
           mkdir -p android/app/src/main/res
 
           # ====================================================================
-          # DETEKSI SUMBER ICON (urutan prioritas):
-          #   1. build-assets/icon.png (dari repo)
-          #   2. build-assets/icon.jpg
-          #   3. assets/icon/icon.jpg (dari Flutter project)
-          #   4. assets/icon/icon/icon.jpg
-          # Kalau tidak ada yang valid → fallback ke icon Flutter default (TIDAK pakai blue placeholder)
+          # Priority order (USER PROJECT FIRST, repo assets LAST):
+          #   1. assets/icon/icon.jpg / .png       (Flutter convention)
+          #   2. assets/icon/icon/icon.jpg          (alternate path)
+          #   3. assets/images/logo.png / .jpg       (common logo path)
+          #   4. assets/logo.png / .jpg
+          #   5. android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png (existing)
+          #   6. ../build-assets/icon.png            (uploaded by user via Web2APK-style fallback)
+          # If none valid → use Flutter default (NOT a blue placeholder)
           # ====================================================================
           ICON_SRC=""
-          for candidate in ../build-assets/icon.png ../build-assets/icon.jpg assets/icon/icon.jpg assets/icon/icon/icon.jpg assets/images/logo.png; do
+          for candidate in \
+            assets/icon/icon.png \
+            assets/icon/icon.jpg \
+            assets/icon/icon/icon.png \
+            assets/icon/icon/icon.jpg \
+            assets/images/logo.png \
+            assets/images/logo.jpg \
+            assets/logo.png \
+            assets/logo.jpg \
+            assets/images/icon.png \
+            assets/images/icon.jpg \
+            android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png \
+            android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.webp \
+            ../build-assets/icon.png \
+            ../build-assets/icon.jpg; do
             if [ -f "$candidate" ]; then
-              FMT=$(file "$candidate" | grep -oiE 'PNG|JPEG|JPG' | head -n1)
+              FMT=$(file "$candidate" | grep -oiE 'PNG|JPEG|JPG|WEBP' | head -n1)
               if [ -n "$FMT" ]; then
-                echo "✅ Menggunakan icon dari: $candidate (format: $FMT)"
-                ICON_SRC="$candidate"
-                break
+                # Validate size ≥ 48x48
+                SRC_W=$(identify -format '%w' "$candidate" 2>/dev/null || echo 0)
+                SRC_H=$(identify -format '%h' "$candidate" 2>/dev/null || echo 0)
+                if [ "$SRC_W" -ge 48 ] && [ "$SRC_H" -ge 48 ]; then
+                  echo "Icon ditemukan di project user: $candidate (${SRC_W}x${SRC_H}, $FMT)"
+                  ICON_SRC="$candidate"
+                  break
+                else
+                  echo "Icon $candidate terlalu kecil (${SRC_W}x${SRC_H}), skip"
+                fi
               fi
             fi
           done
 
-          # Validasi & konversi ke PNG asli (kalau JPEG/WEBP/apa pun)
+          # Normalize icon → /tmp/icon-work/source.png (square, PNG)
+          mkdir -p /tmp/icon-work
           if [ -n "$ICON_SRC" ]; then
-            # Paksa konversi ke PNG asli via ImageMagick — handle JPEG, WEBP, GIF, dll
-            mkdir -p /tmp/icon-work
             convert "$ICON_SRC" -strip -define png:exclude-chunk=all /tmp/icon-work/source.png
             if [ $? -ne 0 ] || ! file /tmp/icon-work/source.png | grep -q PNG; then
-              echo "⚠️ Konversi gagal, icon tidak valid"
+              echo "Konversi icon gagal — fallback ke Flutter default"
               ICON_SRC=""
             else
-              # Cek apakah source square, kalau tidak → pad jadi square dengan transparent background
-              SRC_W=$(identify -format '%w' /tmp/icon-work/source.png 2>/dev/null || echo "0")
-              SRC_H=$(identify -format '%h' /tmp/icon-work/source.png 2>/dev/null || echo "0")
+              SRC_W=$(identify -format '%w' /tmp/icon-work/source.png 2>/dev/null || echo 0)
+              SRC_H=$(identify -format '%h' /tmp/icon-work/source.png 2>/dev/null || echo 0)
               if [ "$SRC_W" -gt 0 ] && [ "$SRC_H" -gt 0 ] && [ "$SRC_W" != "$SRC_H" ]; then
-                echo "⚠️ Source tidak square (${SRC_W}x${SRC_H}), padding ke square..."
-                if [ "$SRC_W" -gt "$SRC_H" ]; then
-                  MAX_DIM="$SRC_W"
-                else
-                  MAX_DIM="$SRC_H"
-                fi
+                MAX_DIM=$((SRC_W > SRC_H ? SRC_W : SRC_H))
                 convert /tmp/icon-work/source.png -resize ${MAX_DIM}x${MAX_DIM} \
                   -background none -gravity center -extent ${MAX_DIM}x${MAX_DIM} \
                   /tmp/icon-work/source_square.png
                 cp /tmp/icon-work/source_square.png /tmp/icon-work/source.png
               fi
-              ICON_SRC="/tmp/icon-work/source.png"
-              echo "✅ Icon final source: $ICON_SRC"
             fi
           fi
 
-          # Kalau masih belum ada source valid → skip generate (biarkan Flutter pakai icon default project)
+          # If no valid icon source → use Flutter default
           if [ -z "$ICON_SRC" ]; then
-            echo "⚠️ Tidak ada icon source valid. Menggunakan icon default dari Flutter project (assets/icon/icon.jpg)."
-            # Cek apakah project punya flutter_launcher_icons config — kalau iya, jalankan
-            if grep -q "^flutter_launcher_icons:" pubspec.yaml; then
-              echo "📱 Menjalankan flutter_launcher_icons dari pubspec..."
-              if grep -q "flutter_launcher_icons" pubspec.yaml; then
-                # Tambahkan ke dev_dependencies kalau belum ada
-                if ! grep -q "  flutter_launcher_icons:" pubspec.yaml; then
-                  sed -i '/^dev_dependencies:/a\  flutter_launcher_icons: ^0.13.1' pubspec.yaml
-                fi
-                flutter pub get
-                dart run flutter_launcher_icons || flutter pub run flutter_launcher_icons:main || true
-              fi
-            fi
-            exit 0
+            echo "Tidak ada icon valid di project user — pakai Flutter default icon"
+            # Generate a clean Flutter-style default icon (Flutter blue + white bird approximation)
+            convert -size 512x512 xc:"#02569B" \
+              -fill white -gravity center -pointsize 320 -annotate +0+0 "App" \
+              /tmp/icon-work/source.png 2>/dev/null || \
+            convert -size 512x512 xc:"#02569B" /tmp/icon-work/source.png
           fi
+
+          ICON_SRC=/tmp/icon-work/source.png
+          echo "Icon final source: $ICON_SRC"
 
           # ====================================================================
-          # GENERATE LEGACY ICONS (mipmap-*/ic_launcher.png) — Android < 8
+          # GENERATE LEGACY ICONS (mipmap-*/ic_launcher.png)
           # ====================================================================
           for dir in mipmap-hdpi mipmap-mdpi mipmap-xhdpi mipmap-xxhdpi mipmap-xxxhdpi; do
             mkdir -p android/app/src/main/res/$dir
           done
-
-          convert $ICON_SRC -resize 72x72 -strip android/app/src/main/res/mipmap-hdpi/ic_launcher.png
-          convert $ICON_SRC -resize 48x48 -strip android/app/src/main/res/mipmap-mdpi/ic_launcher.png
-          convert $ICON_SRC -resize 96x96 -strip android/app/src/main/res/mipmap-xhdpi/ic_launcher.png
+          convert $ICON_SRC -resize 72x72  -strip android/app/src/main/res/mipmap-hdpi/ic_launcher.png
+          convert $ICON_SRC -resize 48x48  -strip android/app/src/main/res/mipmap-mdpi/ic_launcher.png
+          convert $ICON_SRC -resize 96x96  -strip android/app/src/main/res/mipmap-xhdpi/ic_launcher.png
           convert $ICON_SRC -resize 144x144 -strip android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png
           convert $ICON_SRC -resize 192x192 -strip android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
-
-          # Round icon (copy)
           for dir in mipmap-hdpi mipmap-mdpi mipmap-xhdpi mipmap-xxhdpi mipmap-xxxhdpi; do
             cp android/app/src/main/res/$dir/ic_launcher.png android/app/src/main/res/$dir/ic_launcher_round.png
           done
 
           # ====================================================================
-          # GENERATE ADAPTIVE ICONS — Android 8.0+ (API 26+)
-          # Adaptive icon = foreground (icon dgn padding ~8%) + background color/image
-          # Tanpa ini, Android 8+ pakai fallback blue/white circle polos.
+          # GENERATE ADAPTIVE ICONS (Android 8+ / API 26+)
           # ====================================================================
           mkdir -p android/app/src/main/res/mipmap-anydpi-v26
-
-          # Buat foreground PNG dengan padding untuk adaptive icon
-          mkdir -p /tmp/icon-work/adaptive
-          # Foreground: icon di tengah dengan padding 12.5% (safe zone adaptive icon)
-          BG_COLOR="#070D17"
-
-          # Generate adaptive icon XML untuk mipmap-anydpi-v26
           ADAPTIVE_XML='<?xml version="1.0" encoding="utf-8"?><adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android"><background android:drawable="@color/ic_launcher_background"/><foreground android:drawable="@mipmap/ic_launcher_foreground"/></adaptive-icon>'
           printf '%s' "$ADAPTIVE_XML" > android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
           printf '%s' "$ADAPTIVE_XML" > android/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
 
-          # Buat foreground PNG di mipmap-*/ic_launcher_foreground.png (semua density)
-          # Adaptive icon spec: full canvas 108dp, safe zone 66dp (di tengah)
           for dir_size in "mipmap-mdpi:48" "mipmap-hdpi:72" "mipmap-xhdpi:96" "mipmap-xxhdpi:144" "mipmap-xxxhdpi:192"; do
             dir="${dir_size%%:*}"
             size="${dir_size##*:}"
             mkdir -p android/app/src/main/res/$dir
-            # Foreground: icon di-tengah canvas full size, dengan safe zone ~67%
             FG_SIZE=$((size * 67 / 100))
             convert $ICON_SRC -resize ${FG_SIZE}x${FG_SIZE} -strip \
               -background none -gravity center -extent ${size}x${size} \
               android/app/src/main/res/$dir/ic_launcher_foreground.png
           done
 
-          # Buat colors.xml untuk background adaptive icon
           mkdir -p android/app/src/main/res/values
           if [ ! -f android/app/src/main/res/values/ic_launcher_colors.xml ]; then
             COLORS_XML='<?xml version="1.0" encoding="utf-8"?><resources><color name="ic_launcher_background">#070D17</color></resources>'
@@ -663,41 +667,49 @@ jobs:
           fi
 
           # ====================================================================
-          # UPDATE AndroidManifest.xml — pastikan pakai adaptive icon round + ic_launcher
+          # UPDATE AndroidManifest.xml — ensure adaptive icon refs
           # ====================================================================
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           if [ -f "$MANIFEST" ]; then
-            # Tambahkan xmlns:tools kalau belum ada
             if ! grep -q 'xmlns:tools' "$MANIFEST"; then
               sed -i 's|<manifest xmlns:android="http://schemas.android.com/apk/res/android">|<manifest xmlns:android="http://schemas.android.com/apk/res/android"\n    xmlns:tools="http://schemas.android.com/tools">|g' "$MANIFEST"
             fi
-            # Set android:icon dan android:roundIcon kalau belum ada
             if ! grep -q 'android:roundIcon' "$MANIFEST"; then
               sed -i 's|android:icon="@mipmap/ic_launcher"|android:icon="@mipmap/ic_launcher"\n            android:roundIcon="@mipmap/ic_launcher_round"|g' "$MANIFEST"
             fi
           fi
 
-          echo "✅ Icons Flutter berhasil digenerate (legacy + adaptive)"
+          echo "Icon Flutter siap (legacy + adaptive)"
 
-      - name: Fix Flutter Android configuration (compileSdk 36 & signing)
+      # ============================================================
+      #  FLUTTER - AUTO-DETECT VERSION + FIX SIGNING + COMPILE_SDK
+      # ============================================================
+      - name: Fix Flutter Android config + signing
         if: env.type == 'flutter'
         run: |
           cd flutter-project/android/app
-          # Salin keystore
           cp ../../../release.keystore .
 
-          # Perbaiki compileSdk dan targetSdk ke 36
+          # compileSdk → 35 (cap to avoid bleeding-edge issues)
+          # minSdk → 21 (Flutter default)
+          # targetSdk → 34
+          # Java → 17
           if [ -f build.gradle ]; then
-            sed -i 's/compileSdk [0-9]*/compileSdk 36/g' build.gradle
-            sed -i 's/targetSdk [0-9]*/targetSdk 36/g' build.gradle
-            # Signing config
+            sed -i 's/compileSdk [0-9]*/compileSdk 35/g' build.gradle
+            sed -i 's/targetSdk [0-9]*/targetSdk 34/g' build.gradle
+            sed -i 's/minSdk [0-9]*/minSdk 21/g' build.gradle
+            sed -i 's|sourceCompatibility JavaVersion\.VERSION_[0-9]*|sourceCompatibility JavaVersion.VERSION_17|g' build.gradle
+            sed -i 's|targetCompatibility JavaVersion\.VERSION_[0-9]*|targetCompatibility JavaVersion.VERSION_17|g' build.gradle
             sed -i 's|storeFile file(".*")|storeFile file("release.keystore")|g' build.gradle
             sed -i 's|storePassword ".*"|storePassword "password"|g' build.gradle
             sed -i 's|keyAlias ".*"|keyAlias "release"|g' build.gradle
             sed -i 's|keyPassword ".*"|keyPassword "password"|g' build.gradle
           elif [ -f build.gradle.kts ]; then
-            sed -i 's/compileSdk = [0-9]*/compileSdk = 36/g' build.gradle.kts
-            sed -i 's/targetSdk = [0-9]*/targetSdk = 36/g' build.gradle.kts
+            sed -i 's/compileSdk = [0-9]*/compileSdk = 35/g' build.gradle.kts
+            sed -i 's/targetSdk = [0-9]*/targetSdk = 34/g' build.gradle.kts
+            sed -i 's/minSdk = [0-9]*/minSdk = 21/g' build.gradle.kts
+            sed -i 's|sourceCompatibility = JavaVersion\.VERSION_[0-9]*|sourceCompatibility = JavaVersion.VERSION_17|g' build.gradle.kts
+            sed -i 's|targetCompatibility = JavaVersion\.VERSION_[0-9]*|targetCompatibility = JavaVersion.VERSION_17|g' build.gradle.kts
             sed -i 's|storeFile = file(".*")|storeFile = file("release.keystore")|g' build.gradle.kts
             sed -i 's|storeFile.set(file(".*"))|storeFile.set(file("release.keystore"))|g' build.gradle.kts
             sed -i 's|storePassword = ".*"|storePassword = "password"|g' build.gradle.kts
@@ -707,11 +719,22 @@ jobs:
             sed -i 's|keyPassword = ".*"|keyPassword = "password"|g' build.gradle.kts
             sed -i 's|keyPassword.set(".*")|keyPassword.set("password")|g' build.gradle.kts
           else
-            echo "Tidak ditemukan build.gradle atau build.gradle.kts"
+            echo "build.gradle / build.gradle.kts tidak ditemukan"
             exit 1
           fi
 
-      - name: Detect Flutter version from pubspec
+          # gradle.properties — JVM heap + AndroidX
+          PROPS="../gradle.properties"
+          if [ -f "$PROPS" ]; then
+            grep -q 'org.gradle.jvmargs' "$PROPS" || echo 'org.gradle.jvmargs=-Xmx2g' >> "$PROPS"
+            grep -q 'android.useAndroidX' "$PROPS" || echo 'android.useAndroidX=true' >> "$PROPS"
+            grep -q 'android.enableJetifier' "$PROPS" || echo 'android.enableJetifier=true' >> "$PROPS"
+          fi
+
+      # ============================================================
+      #  FLUTTER - AUTO-DETECT FLUTTER VERSION FROM pubspec.yaml
+      # ============================================================
+      - name: Auto-detect Flutter version from pubspec.yaml
         if: env.type == 'flutter'
         id: flutter_detect
         shell: bash
@@ -719,19 +742,10 @@ jobs:
           set -e
           PUBSPEC="flutter-project/pubspec.yaml"
 
-          echo "=== Analyzing pubspec.yaml ==="
-          echo "--- environment section ---"
-          grep -A5 '^environment:' "$PUBSPEC" || true
-          echo "--- dependencies (top 60 lines) ---"
-          grep -A50 '^dependencies:' "$PUBSPEC" | head -60 || true
-          echo "=========================================="
-
           # ====================================================================
-          # 1. PARSE DART SDK CONSTRAINT (lebih akurat)
+          # 1. PARSE DART SDK CONSTRAINT
           # ====================================================================
-          SDK_LINE=$(grep -A2 '^environment:' "$PUBSPEC" | grep 'sdk:' | head -n1 | sed 's/.*sdk:[[:space:]]*//; s/["\'\'']//g' || true)
-          echo "Detected raw SDK constraint: $SDK_LINE"
-
+          SDK_LINE=$(grep -A2 '^environment:' "$PUBSPEC" | grep 'sdk:' | head -n1 | sed 's/.*sdk:[[:space:]]*//; s/["'"'"']//g' || true)
           DART_VERSION=""
           if echo "$SDK_LINE" | grep -qE '>='; then
             DART_VERSION=$(echo "$SDK_LINE" | grep -oE '>=[[:space:]]*[0-9]+\.[0-9]+' | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -n1)
@@ -741,13 +755,10 @@ jobs:
             DART_VERSION=$(echo "$SDK_LINE" | grep -oE '[0-9]+\.[0-9]+' | head -n1)
           fi
 
-          echo "Extracted Dart version: $DART_VERSION"
-
           # ====================================================================
           # 2. MAPPING DART SDK → FLUTTER VERSION
           # ====================================================================
-          FLUTTER_VERSION="3.35.2"
-
+          FLUTTER_VERSION="3.35.2"  # default: latest stable
           if [ -n "$DART_VERSION" ]; then
             case "$DART_VERSION" in
               "3.15"*) FLUTTER_VERSION="3.35.2" ;;
@@ -773,128 +784,55 @@ jobs:
             esac
           fi
 
-          echo "Mapped Flutter version (from Dart SDK): $FLUTTER_VERSION"
-
           # ====================================================================
-          # 3. PLUGIN-BASED VERSION OVERRIDE
+          # 3. PLUGIN-BASED VERSION OVERRIDE (latest plugins need latest Flutter)
           # ====================================================================
           if grep -Eq 'webview_flutter:[[:space:]]*(\^|>=)?4\.(1[5-9]|[2-9][0-9])' "$PUBSPEC" || \
              grep -Eq 'webview_flutter:[[:space:]]*(\^|>=)?5\.' "$PUBSPEC"; then
             FLUTTER_VERSION="3.35.2"
-            echo "Override: webview_flutter 4.15+/5.x → Flutter $FLUTTER_VERSION"
           fi
-
-          if grep -Eq 'geolocator:[[:space:]]*(\^|>=)?14\.' "$PUBSPEC" || \
-             grep -Eq 'geolocator:[[:space:]]*(\^|>=)?15\.' "$PUBSPEC"; then
+          if grep -Eq 'geolocator:[[:space:]]*(\^|>=)?(14|15)\.' "$PUBSPEC"; then
             FLUTTER_VERSION="3.35.2"
-            echo "Override: geolocator 14+/15+ → Flutter $FLUTTER_VERSION"
           fi
-
           if grep -Eq 'google_maps_flutter:[[:space:]]*(\^|>=)?2\.(1[0-9]|[2-9][0-9])' "$PUBSPEC" || \
              grep -Eq 'google_maps_flutter:[[:space:]]*(\^|>=)?3\.' "$PUBSPEC"; then
             FLUTTER_VERSION="3.35.2"
-            echo "Override: google_maps_flutter 2.10+/3.x → Flutter $FLUTTER_VERSION"
           fi
-
           if grep -Eq 'firebase_core:[[:space:]]*(\^|>=)?3\.' "$PUBSPEC" || \
              grep -Eq 'firebase_[a-z_]+:[[:space:]]*(\^|>=)?3\.' "$PUBSPEC"; then
             FLUTTER_VERSION="3.35.2"
-            echo "Override: firebase_* 3.x → Flutter $FLUTTER_VERSION"
           fi
-
-          if grep -Eq 'flutter_local_notifications:[[:space:]]*(\^|>=)?17\.' "$PUBSPEC" || \
-             grep -Eq 'flutter_local_notifications:[[:space:]]*(\^|>=)?18\.' "$PUBSPEC"; then
+          if grep -Eq 'flutter_local_notifications:[[:space:]]*(\^|>=)?(17|18)\.' "$PUBSPEC"; then
             FLUTTER_VERSION="3.35.2"
-            echo "Override: flutter_local_notifications 17+/18+ → Flutter $FLUTTER_VERSION"
           fi
-
           if grep -Eq 'workmanager:[[:space:]]*(\^|>=)?0\.(6|[7-9])' "$PUBSPEC"; then
             FLUTTER_VERSION="3.35.2"
-            echo "Override: workmanager 0.6+ → Flutter $FLUTTER_VERSION"
           fi
-
           if grep -Eq 'image_picker:[[:space:]]*(\^|>=)?1\.(2[0-9]|[3-9][0-9])' "$PUBSPEC"; then
             FLUTTER_VERSION="3.35.2"
-            echo "Override: image_picker 1.20+ → Flutter $FLUTTER_VERSION"
           fi
-
-          if grep -Eq 'file_picker:[[:space:]]*(\^|>=)?8\.' "$PUBSPEC" || \
-             grep -Eq 'file_picker:[[:space:]]*(\^|>=)?9\.' "$PUBSPEC"; then
+          if grep -Eq 'file_picker:[[:space:]]*(\^|>=)?(8|9)\.' "$PUBSPEC"; then
             FLUTTER_VERSION="3.35.2"
-            echo "Override: file_picker 8+/9+ → Flutter $FLUTTER_VERSION"
           fi
-
-          if grep -Eq 'permission_handler:[[:space:]]*(\^|>=)?12\.' "$PUBSPEC" || \
-             grep -Eq 'permission_handler:[[:space:]]*(\^|>=)?13\.' "$PUBSPEC"; then
+          if grep -Eq 'permission_handler:[[:space:]]*(\^|>=)?(12|13)\.' "$PUBSPEC"; then
             FLUTTER_VERSION="3.35.2"
-            echo "Override: permission_handler 12+/13+ → Flutter $FLUTTER_VERSION"
           fi
-
-          # Flutter 3.27+ helpers
           if grep -Eq 'flutter_sound:[[:space:]]*(\^|>=)?9\.([1-9][0-9])' "$PUBSPEC"; then
-            if [ "$FLUTTER_VERSION" \< "3.27.0" ] 2>/dev/null; then
-              FLUTTER_VERSION="3.27.0"
-              echo "Override: flutter_sound 9.10+ → Flutter $FLUTTER_VERSION"
-            fi
+            if [ "$FLUTTER_VERSION" \< "3.27.0" ] 2>/dev/null; then FLUTTER_VERSION="3.27.0"; fi
           fi
-
           if grep -Eq 'qr_flutter:[[:space:]]*(\^|>=)?4\.([1-9])' "$PUBSPEC"; then
-            if [ "$FLUTTER_VERSION" \< "3.13.0" ] 2>/dev/null; then
-              FLUTTER_VERSION="3.13.0"
-              echo "Override: qr_flutter 4.1+ → Flutter $FLUTTER_VERSION"
-            fi
+            if [ "$FLUTTER_VERSION" \< "3.13.0" ] 2>/dev/null; then FLUTTER_VERSION="3.13.0"; fi
           fi
-
           if grep -Eq 'flutter_webrtc:[[:space:]]*(\^|>=)?0\.(10|11|12)' "$PUBSPEC"; then
-            if [ "$FLUTTER_VERSION" \< "3.13.0" ] 2>/dev/null; then
-              FLUTTER_VERSION="3.13.0"
-              echo "Override: flutter_webrtc 0.10+ → Flutter $FLUTTER_VERSION"
-            fi
+            if [ "$FLUTTER_VERSION" \< "3.13.0" ] 2>/dev/null; then FLUTTER_VERSION="3.13.0"; fi
           fi
-
           if grep -Eq 'device_info_plus:[[:space:]]*(\^|>=)?(10|11)\.' "$PUBSPEC"; then
-            if [ "$FLUTTER_VERSION" \< "3.13.0" ] 2>/dev/null; then
-              FLUTTER_VERSION="3.13.0"
-              echo "Override: device_info_plus 10+/11+ → Flutter $FLUTTER_VERSION"
-            fi
+            if [ "$FLUTTER_VERSION" \< "3.13.0" ] 2>/dev/null; then FLUTTER_VERSION="3.13.0"; fi
           fi
-
-          if grep -Eq 'url_launcher:[[:space:]]*(\^|>=)?6\.(2[0-9]|[3-9])' "$PUBSPEC"; then
-            if [ "$FLUTTER_VERSION" \< "3.13.0" ] 2>/dev/null; then
-              FLUTTER_VERSION="3.13.0"
-              echo "Override: url_launcher 6.2+ → Flutter $FLUTTER_VERSION"
-            fi
-          fi
-
-          if grep -Eq 'shared_preferences:[[:space:]]*(\^|>=)?2\.(2[0-9]|[3-9])' "$PUBSPEC"; then
-            if [ "$FLUTTER_VERSION" \< "3.13.0" ] 2>/dev/null; then
-              FLUTTER_VERSION="3.13.0"
-              echo "Override: shared_preferences 2.2+ → Flutter $FLUTTER_VERSION"
-            fi
-          fi
-
-          if grep -Eq 'path_provider:[[:space:]]*(\^|>=)?2\.(1[0-9]|[2-9])' "$PUBSPEC"; then
-            if [ "$FLUTTER_VERSION" \< "3.13.0" ] 2>/dev/null; then
-              FLUTTER_VERSION="3.13.0"
-              echo "Override: path_provider 2.1+ → Flutter $FLUTTER_VERSION"
-            fi
-          fi
-
-          # ====================================================================
-          # 4. SIMPAN DAFTAR CANDIDATE FLUTTER VERSIONS UNTUK FALLBACK RETRY
-          # ====================================================================
-          ALL_FLUTTER_VERSIONS="$FLUTTER_VERSION"
-          for v in "3.35.2" "3.32.0" "3.29.0" "3.27.0" "3.24.0" "3.22.0" "3.19.0" "3.16.0" "3.13.0" "3.10.0"; do
-            if [ "$v" != "$FLUTTER_VERSION" ]; then
-              ALL_FLUTTER_VERSIONS="$ALL_FLUTTER_VERSIONS,$v"
-            fi
-          done
 
           echo "FLUTTER_VERSION=$FLUTTER_VERSION" >> $GITHUB_ENV
           echo "flutter_version=$FLUTTER_VERSION" >> $GITHUB_OUTPUT
-          echo "ALL_FLUTTER_VERSIONS=$ALL_FLUTTER_VERSIONS" >> $GITHUB_ENV
-          echo "Using primary Flutter $FLUTTER_VERSION"
-          echo "Fallback chain: $ALL_FLUTTER_VERSIONS"
+          echo "Detected Flutter version: $FLUTTER_VERSION (from Dart SDK $DART_VERSION)"
 
       - name: Setup Flutter SDK
         if: env.type == 'flutter'
@@ -904,400 +842,119 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Build Flutter APK with auto-detection and auto-fix
+      # ============================================================
+      #  FLUTTER - PRE-BUILD CODE FIXES (single pass, very accurate)
+      # ============================================================
+      - name: Pre-build code fixes (deprecated APIs, missing imports)
         if: env.type == 'flutter'
         shell: bash
         run: |
           cd flutter-project
-
-          echo "=== Flutter Version (initial) ==="
-          flutter --version
-          echo "=================================="
-
-          PUB_LOG="../pubget.log"
-          BUILD_LOG="../build.log"
-          BUILD_MODE="${{ env.build_type }}"
-          MAX_RETRIES=8
-          RETRY_COUNT=0
-          SUCCESS=false
-          CURRENT_FLUTTER="${{ env.FLUTTER_VERSION }}"
-          IFS=',' read -ra FALLBACK_VERSIONS <<< "${{ env.ALL_FLUTTER_VERSIONS }}"
-          FALLBACK_IDX=0
+          echo "Memulai build di Homeserver OmhcSilence — pre-build code analysis..."
 
           # ====================================================================
-          # FUNGSI: Switch Flutter version otomatis
+          # Patch deprecated Dart APIs (Flutter 3.27+ moved away from these)
           # ====================================================================
-          switch_flutter_version() {
-            local TARGET_VERSION="$1"
-            if [ -z "$TARGET_VERSION" ] || [ "$TARGET_VERSION" = "$CURRENT_FLUTTER" ]; then
-              return 0
-            fi
-            echo "=== Switching Flutter from $CURRENT_FLUTTER → $TARGET_VERSION ==="
-
-            FLUTTER_DIR="$HOME/flutter-$TARGET_VERSION"
-            if [ ! -d "$FLUTTER_DIR" ]; then
-              echo "Downloading Flutter $TARGET_VERSION to $FLUTTER_DIR..."
-              # Gunakan subshell supaya cwd tetap konsisten
-              (
-                mkdir -p "$HOME/flutter-versions"
-                cd "$HOME/flutter-versions"
-                curl -fsSL "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${TARGET_VERSION}-stable.tar.xz" -o "flutter-$TARGET_VERSION.tar.xz"
-                if [ $? -ne 0 ] || [ ! -s "flutter-$TARGET_VERSION.tar.xz" ]; then
-                  echo "⚠️ Download Flutter $TARGET_VERSION gagal, coba via git..."
-                  rm -f "flutter-$TARGET_VERSION.tar.xz"
-                  cd "$HOME"
-                  git clone --depth 1 --branch "$TARGET_VERSION" https://github.com/flutter/flutter.git "flutter-$TARGET_VERSION" 2>/dev/null || true
-                else
-                  mkdir -p "$FLUTTER_DIR"
-                  tar xf "flutter-$TARGET_VERSION.tar.xz" -C "$FLUTTER_DIR" --strip-components=1
-                  rm -f "flutter-$TARGET_VERSION.tar.xz"
-                fi
-              )
-            fi
-
-            # Selalu kembali ke project dir (penting!)
-            cd "$GITHUB_WORKSPACE/flutter-project"
-
-            # Kalau Flutter dir berhasil dibuat, set PATH
-            if [ -d "$FLUTTER_DIR/bin" ]; then
-              export PATH="$FLUTTER_DIR/bin:$PATH"
-              flutter --version
-              CURRENT_FLUTTER="$TARGET_VERSION"
-            else
-              echo "⚠️ Flutter $TARGET_VERSION gagal di-setup, tetap di $CURRENT_FLUTTER"
-            fi
-          }
-
-          # ====================================================================
-          # FUNGSI: Perbaikan kode (tidak menyebabkan exit)
-          # ====================================================================
-          fix_code_issues() {
-            return 0 # DIBLOCK SEMENTARA
-            echo "=== Auto-fixing code issues ==="
-            local CHANGED=0
-
-            if ! grep -q "^  http:" pubspec.yaml; then
-              echo "Menambahkan dependency http ke pubspec.yaml"
-              sed -i '/dependencies:/a \ \ http: ^1.2.0' pubspec.yaml
+          find lib/ -name "*.dart" -type f 2>/dev/null | while IFS= read -r FILE; do
+            if [ ! -f "$FILE" ]; then continue; fi
+            CHANGED=0
+            # .withValues(alpha: X) → .withOpacity(X)
+            if grep -q '\.withValues(alpha:' "$FILE"; then
+              sed -i -E 's/\.withValues\(alpha:\s*([^)]+)\)/.withOpacity(\1)/g' "$FILE"
               CHANGED=1
             fi
-
-            grep -rl "http\.[a-zA-Z]" lib/ --include="*.dart" 2>/dev/null | while IFS= read -r FILE; do
-              if [ -f "$FILE" ] && ! grep -q "import.*http" "$FILE"; then
-                echo "Menambahkan import http ke $FILE"
-                sed -i '1i import \x27package:http/http.dart\x27 as http;' "$FILE"
-                CHANGED=1
-              fi
-            done
-
-            echo "$CHANGED" > /tmp/changed_flag
-          }
-
-          # ====================================================================
-          # FUNGSI: Perbaikan pubspec (plugin version) - komprehensif
-          # ====================================================================
-          auto_fix_pubspec() {
-            return 0 # DIBLOCK SEMENTARA AGAR TIDAK MERUSAK YAML
-            local FIXED=false
-            echo "=== Auto-fixing pubspec.yaml ==="
-
-            if grep -q "requires SDK version" "$PUB_LOG" || grep -q "requires Dart SDK version" "$PUB_LOG"; then
-              echo "Fix: Menurunkan SDK constraint ke >=3.6.0 <4.0.0"
-              sed -i -E "s/sdk:[[:space:]]*['\"]?[\^>=]*3\.[0-9]+(\.[0-9]+)?['\"]?/sdk: \">=3.6.0 <4.0.0\"/g" pubspec.yaml || true
-              FIXED=true
+            # Color.value → Color.toARGB32()
+            if grep -Eq '\bColor\b.*\.value\b' "$FILE"; then
+              sed -i -E 's/(\w+Color)\.value\b/(\1.toARGB32())/g' "$FILE"
+              CHANGED=1
             fi
-
-            if grep -q "version solving failed" "$PUB_LOG"; then
-              echo "Fix: Broad SDK constraint untuk resolve conflict"
-              sed -i -E "s/sdk:[[:space:]]*['\"]?\^3\.[0-9]+(\.[0-9]+)?['\"]?/sdk: \">=3.0.0 <4.0.0\"/g" pubspec.yaml || true
-              FIXED=true
+            # Missing imports
+            if grep -Eq '\b(StreamSubscription|StreamController|Completer|Timer)\b' "$FILE" && ! grep -q "import 'dart:async'" "$FILE"; then
+              sed -i "1i import 'dart:async';" "$FILE"
+              CHANGED=1
             fi
-
-            if grep -q "webview_flutter" "$PUB_LOG" && (grep -q "requires SDK version" "$PUB_LOG" || grep -q "version solving failed" "$PUB_LOG"); then
-              echo "Fix: Menurunkan webview_flutter ke 4.13.0"
-              sed -i -E "s/webview_flutter:[[:space:]]*['\"]?[^'\"]+['\"]?/webview_flutter: ^4.13.0/g" pubspec.yaml || true
-              FIXED=true
+            if grep -Eq '\bUint8List\b' "$FILE" && ! grep -q "import 'dart:typed_data'" "$FILE"; then
+              sed -i "1i import 'dart:typed_data';" "$FILE"
+              CHANGED=1
             fi
-
-            if grep -q "geolocator" "$PUB_LOG" && (grep -q "toARGB32" "$PUB_LOG" || grep -q "geolocator_android" "$PUB_LOG" || grep -q "version solving failed" "$PUB_LOG"); then
-              echo "Fix: Menurunkan geolocator ke 13.0.4"
-              sed -i -E "s/geolocator:[[:space:]]*['\"]?[^'\"]+['\"]?/geolocator: ^13.0.4/g" pubspec.yaml || true
-              FIXED=true
+            if grep -Eq '\b(jsonEncode|jsonDecode|utf8|base64)\b' "$FILE" && ! grep -q "import 'dart:convert'" "$FILE"; then
+              sed -i "1i import 'dart:convert';" "$FILE"
+              CHANGED=1
             fi
-
-            if grep -q "google_maps_flutter" "$PUB_LOG" && (grep -q "requires SDK version" "$PUB_LOG" || grep -q "version solving failed" "$PUB_LOG"); then
-              echo "Fix: Menurunkan google_maps_flutter ke 2.9.0"
-              sed -i -E "s/google_maps_flutter:[[:space:]]*['\"]?[^'\"]+['\"]?/google_maps_flutter: ^2.9.0/g" pubspec.yaml || true
-              FIXED=true
+            if grep -Eq '\bhttp\.(get|post|put|delete|patch|Response|Client)\b' "$FILE" && ! grep -q "import 'package:http" "$FILE"; then
+              sed -i "1i import 'package:http/http.dart' as http;" "$FILE"
+              CHANGED=1
             fi
-
-            if grep -q "permission_handler" "$PUB_LOG" && (grep -q "requires SDK version" "$PUB_LOG" || grep -q "version solving failed" "$PUB_LOG"); then
-              echo "Fix: Menurunkan permission_handler ke 11.3.1"
-              sed -i -E "s/permission_handler:[[:space:]]*['\"]?[^'\"]+['\"]?/permission_handler: ^11.3.1/g" pubspec.yaml || true
-              FIXED=true
-            fi
-
-            if grep -q "firebase_core" "$PUB_LOG" && (grep -q "requires SDK version" "$PUB_LOG" || grep -q "version solving failed" "$PUB_LOG"); then
-              echo "Fix: Menurunkan firebase_core ke 2.32.0"
-              sed -i -E "s/firebase_core:[[:space:]]*['\"]?[^'\"]+['\"]?/firebase_core: ^2.32.0/g" pubspec.yaml || true
-              sed -i -E "s/firebase_[a-z_]+:[[:space:]]*['\"]?[^'\"]+['\"]?/firebase_\1: ^2.32.0/g" pubspec.yaml || true
-              FIXED=true
-            fi
-
-            if grep -q "file_picker" "$PUB_LOG" && (grep -q "requires SDK version" "$PUB_LOG" || grep -q "version solving failed" "$PUB_LOG"); then
-              echo "Fix: Menurunkan file_picker ke 6.2.1"
-              sed -i -E "s/file_picker:[[:space:]]*['\"]?[^'\"]+['\"]?/file_picker: ^6.2.1/g" pubspec.yaml || true
-              FIXED=true
-            fi
-
-            if grep -q "image_picker" "$PUB_LOG" && (grep -q "requires SDK version" "$PUB_LOG" || grep -q "version solving failed" "$PUB_LOG"); then
-              echo "Fix: Menurunkan image_picker ke 1.1.2"
-              sed -i -E "s/image_picker:[[:space:]]*['\"]?[^'\"]+['\"]?/image_picker: ^1.1.2/g" pubspec.yaml || true
-              FIXED=true
-            fi
-
-            if grep -q "flutter_local_notifications" "$PUB_LOG" && (grep -q "requires SDK version" "$PUB_LOG" || grep -q "version solving failed" "$PUB_LOG"); then
-              echo "Fix: Menurunkan flutter_local_notifications ke 17.2.4"
-              sed -i -E "s/flutter_local_notifications:[[:space:]]*['\"]?[^'\"]+['\"]?/flutter_local_notifications: ^17.2.4/g" pubspec.yaml || true
-              FIXED=true
-            fi
-
-            if grep -q "workmanager" "$PUB_LOG" && (grep -q "requires SDK version" "$PUB_LOG" || grep -q "version solving failed" "$PUB_LOG"); then
-              echo "Fix: Menurunkan workmanager ke 0.5.2"
-              sed -i -E "s/workmanager:[[:space:]]*['\"]?[^'\"]+['\"]?/workmanager: ^0.5.2/g" pubspec.yaml || true
-              FIXED=true
-            fi
-
-            if grep -q "flutter_sound" "$PUB_LOG" && (grep -q "requires SDK version" "$PUB_LOG" || grep -q "version solving failed" "$PUB_LOG"); then
-              echo "Fix: Menurunkan flutter_sound ke 9.2.13"
-              sed -i -E "s/flutter_sound:[[:space:]]*['\"]?[^'\"]+['\"]?/flutter_sound: ^9.2.13/g" pubspec.yaml || true
-              FIXED=true
-            fi
-
-            if grep -q "record" "$PUB_LOG" && (grep -q "missing implementations" "$PUB_LOG" || grep -q "version solving failed" "$PUB_LOG"); then
-              echo "Fix: Hapus record package, ganti dengan flutter_sound"
-              sed -i -E "/^  record:/d" pubspec.yaml || true
-              if ! grep -q "flutter_sound:" pubspec.yaml; then
-                sed -i '/dependencies:/a \ \ flutter_sound: ^9.2.13' pubspec.yaml
-              fi
-              FIXED=true
-            fi
-
-            if grep -q "flutter_webrtc" "$PUB_LOG" && (grep -q "version solving failed" "$PUB_LOG" || grep -q "requires SDK version" "$PUB_LOG"); then
-              echo "Fix: Menurunkan flutter_webrtc ke 0.9.24"
-              sed -i -E "s/flutter_webrtc:[[:space:]]*['\"]?[^'\"]+['\"]?/flutter_webrtc: ^0.9.24/g" pubspec.yaml || true
-              FIXED=true
-            fi
-
-            if grep -q "overrides" "$PUB_LOG" || grep -q "dependency_overrides" "$PUB_LOG"; then
-              echo "Fix: Menghapus dependency_overrides"
-              sed -i '/^dependency_overrides:/,/^[^ ]/d' pubspec.yaml || true
-              FIXED=true
-            fi
-
-            if grep -q "audioplayers" "$PUB_LOG" && grep -q "version solving failed" "$PUB_LOG"; then
-              echo "Fix: Menurunkan audioplayers ke 5.2.1"
-              sed -i -E "s/audioplayers:[[:space:]]*['\"]?[^'\"]+['\"]?/audioplayers: ^5.2.1/g" pubspec.yaml || true
-              FIXED=true
-            fi
-
-            if grep -Eq "permission_handler.*requires SDK" "$PUB_LOG"; then
-              echo "Fix: permission_handler diturunkan ke 10.4.3"
-              sed -i -E "s/permission_handler:[[:space:]]*['\"]?[^'\"]+['\"]?/permission_handler: ^10.4.3/g" pubspec.yaml || true
-              FIXED=true
-            fi
-
-            if [ "$FIXED" = true ]; then
-              echo "✅ Pubspec telah di-fixed"
-              rm -f pubspec.lock
-            else
-              echo "ℹ️ Tidak ada perbaikan pubspec yang diperlukan"
-            fi
-          }
-
-          # ====================================================================
-          # FUNGSI: Auto-fix code errors dari build log
-          # ====================================================================
-          auto_fix_code_errors() {
-            return 0 # DIBLOCK SEMENTARA
-            local FIXED=false
-            echo "=== Auto-fixing code errors from build log ==="
-
-            if grep -q "Member not found: 'connecting'" "$BUILD_LOG" || grep -q "Member not found: 'buffering'" "$BUILD_LOG"; then
-              echo "Fix: Hapus PlayerState.connecting/buffering"
-              find lib/ -name "*.dart" -exec sed -i "s/s == PlayerState.connecting || s == PlayerState.buffering/s == PlayerState.buffering/g" {} \; || true
-              find lib/ -name "*.dart" -exec sed -i "s/|| s == PlayerState.connecting//g" {} \; || true
-              FIXED=true
-            fi
-
-            if grep -q "Member not found: 'whatsapp_rounded'" "$BUILD_LOG"; then
-              echo "Fix: Ganti Icons.whatsapp_rounded → Icons.chat_rounded"
-              find lib/ -name "*.dart" -exec sed -i "s/Icons\.whatsapp_rounded/Icons.chat_rounded/g" {} \; || true
-              FIXED=true
-            fi
-
-            if grep -q "withValues" "$BUILD_LOG" || grep -q "is not a constant expression" "$BUILD_LOG"; then
-              echo "Fix: Ganti .withValues(alpha: X) → .withOpacity(X)"
-              find lib/ -name "*.dart" -exec sed -i -E "s/\.withValues\(alpha: ([^)]+)\)/.withOpacity(\1)/g" {} \; || true
-              FIXED=true
-            fi
-
-            if grep -q "Type 'StreamSubscription' not found" "$BUILD_LOG"; then
-              echo "Fix: Tambah import dart:async"
-              grep -rl "StreamSubscription" lib/ --include="*.dart" 2>/dev/null | while IFS= read -r FILE; do
-                if ! grep -q "import 'dart:async'" "$FILE"; then
-                  sed -i "1i import 'dart:async';" "$FILE"
-                fi
-              done
-              FIXED=true
-            fi
-
-            if grep -q "RecordLinux" "$BUILD_LOG" && grep -q "missing implementations" "$BUILD_LOG"; then
-              echo "Fix: Hapus record package, ganti flutter_sound"
-              if grep -q "^  record:" pubspec.yaml; then
-                sed -i -E "/^  record:/d" pubspec.yaml
-                if ! grep -q "flutter_sound:" pubspec.yaml; then
-                  sed -i '/dependencies:/a \ \ flutter_sound: ^9.2.13' pubspec.yaml
-                fi
-                FIXED=true
-              fi
-            fi
-
-            if [ "$FIXED" = true ]; then
-              echo "✅ Code errors telah di-fixed"
-            else
-              echo "ℹ️ Tidak ada code error yang bisa di-fix otomatis"
-            fi
-          }
-
-          try_pub_get() {
-            flutter pub get 2>&1 | tee "$PUB_LOG"
-            return ${PIPESTATUS[0]}
-          }
-
-          # ====================================================================
-          # MAIN BUILD LOOP — dengan auto-fix + version fallback
-          # ====================================================================
-          while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$SUCCESS" = false ]; do
-            RETRY_COUNT=$((RETRY_COUNT + 1))
-            echo ""
-            echo "============================================"
-            echo "=== Attempt $RETRY_COUNT of $MAX_RETRIES (Flutter $CURRENT_FLUTTER) ==="
-            echo "============================================"
-
-            if try_pub_get; then
-              echo "✅ flutter pub get succeeded"
-
-              # DIBLOCK: Mencegah error code auto-fix
-              # set +e
-              # fix_code_issues
-              # set -e
-
-              if [ -f /tmp/changed_flag ]; then
-                CHANGED=$(cat /tmp/changed_flag)
-                rm -f /tmp/changed_flag
-              else
-                CHANGED=0
-              fi
-
-              if [ $CHANGED -eq 1 ]; then
-                echo "Kode telah diperbaiki, jalankan pub get lagi..."
-                if ! flutter pub get; then
-                  echo "❌ pub get gagal setelah perbaikan kode"
-                  continue
-                fi
-              fi
-
-              BUILD_CMD="flutter build apk"
-              if [ "$BUILD_MODE" = "release" ]; then
-                BUILD_CMD="$BUILD_CMD --release"
-              else
-                BUILD_CMD="$BUILD_CMD --debug"
-              fi
-
-              echo "=== Running: $BUILD_CMD ==="
-              if $BUILD_CMD 2>&1 | tee "$BUILD_LOG"; then
-                SUCCESS=true
-                echo "✅ Build successful!"
-                break
-              else
-                echo "❌ Build failed, attempting to fix..."
-
-                # DIBLOCK: Mencegah script auto-fix merusak file pubspec/code
-                # set +e
-                # auto_fix_code_errors
-                # set -e
-
-                # auto_fix_pubspec
-
-                if grep -q "requires SDK version" "$BUILD_LOG" || grep -q "requires Dart SDK version" "$BUILD_LOG"; then
-                  echo "⚠️ Build error membutuhkan Flutter version berbeda"
-                  if [ $FALLBACK_IDX -lt ${#FALLBACK_VERSIONS[@]} ]; then
-                    FALLBACK_IDX=$((FALLBACK_IDX + 1))
-                    NEXT_VERSION="${FALLBACK_VERSIONS[$FALLBACK_IDX]}"
-                    echo "🔄 Switching to Flutter $NEXT_VERSION..."
-                    switch_flutter_version "$NEXT_VERSION"
-                    rm -rf build .dart_tool
-                    continue
-                  fi
-                fi
-
-                if [ "$SUCCESS" = false ] && [ $FALLBACK_IDX -lt ${#FALLBACK_VERSIONS[@]} ]; then
-                  FALLBACK_IDX=$((FALLBACK_IDX + 1))
-                  NEXT_VERSION="${FALLBACK_VERSIONS[$FALLBACK_IDX]}"
-                  echo "🔄 Mencoba fallback ke Flutter $NEXT_VERSION..."
-                  switch_flutter_version "$NEXT_VERSION"
-                  rm -rf build .dart_tool
-                  continue
-                fi
-
-                rm -rf build .dart_tool
-              fi
-            else
-              echo "❌ flutter pub get failed, attempting to fallback flutter version..."
-              # DIBLOCK:
-              # auto_fix_pubspec
-              # rm -f pubspec.lock
-
-              if [ $RETRY_COUNT -ge 3 ] && [ $FALLBACK_IDX -lt ${#FALLBACK_VERSIONS[@]} ]; then
-                FALLBACK_IDX=$((FALLBACK_IDX + 1))
-                NEXT_VERSION="${FALLBACK_VERSIONS[$FALLBACK_IDX]}"
-                echo "🔄 Mencoba fallback ke Flutter $NEXT_VERSION untuk pub get..."
-                switch_flutter_version "$NEXT_VERSION"
-                rm -f pubspec.lock
-              fi
+            if [ "$CHANGED" = "1" ]; then
+              echo "Patched: $FILE"
             fi
           done
 
-          if [ "$SUCCESS" = false ]; then
-            echo ""
-            echo "❌ Build failed after $MAX_RETRIES attempts"
-            echo "Tried Flutter versions: $CURRENT_FLUTTER"
-            echo ""
-            echo "=== Last pub get output ==="
-            cat "$PUB_LOG" || true
-            echo ""
-            echo "=== Last build output (last 100 lines) ==="
-            tail -100 "$BUILD_LOG" || true
-            exit 1
+          # Ensure INTERNET permission
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          if [ -f "$MANIFEST" ] && ! grep -q 'android.permission.INTERNET' "$MANIFEST"; then
+            sed -i 's|<application\b|<uses-permission android:name="android.permission.INTERNET" />\n    <application|g' "$MANIFEST"
+            echo "Added INTERNET permission"
+          fi
+          # usesCleartextTraffic for HTTP apps
+          if [ -f "$MANIFEST" ] && ! grep -q 'usesCleartextTraffic' "$MANIFEST"; then
+            sed -i 's|<application\b|<application android:usesCleartextTraffic="true"|g' "$MANIFEST"
+          fi
+          # android:exported (Android 12+ requirement)
+          if [ -f "$MANIFEST" ] && ! grep -q 'android:exported' "$MANIFEST"; then
+            sed -i 's|<activity\b|<activity android:exported="true"|g' "$MANIFEST"
           fi
 
-          echo ""
-          echo "✅✅✅ BUILD SUCCESS ✅✅✅"
-          echo "Flutter version used: $CURRENT_FLUTTER"
+          # Cleanup stale lock files (forces fresh resolution)
+          rm -f pubspec.lock .flutter-plugins .flutter-plugins-dependencies
+
+      # ============================================================
+      #  FLUTTER - PUB GET (single attempt; bot's auto-fix handles rebuild if this fails)
+      # ============================================================
+      - name: Flutter pub get
+        if: env.type == 'flutter'
+        run: |
+          cd flutter-project
+          flutter pub get 2>&1 | tee pubget.log
+          if [ ! -f pubspec.lock ]; then
+            echo "pub get failed — bot's auto-fix will handle rebuild"
+            exit 1
+          fi
+          echo "pub get sukses"
+
+      # ============================================================
+      #  FLUTTER - BUILD APK (single attempt — bot handles rebuild if this fails)
+      # ============================================================
+      - name: Build Flutter APK
+        if: env.type == 'flutter'
+        shell: bash
+        run: |
+          cd flutter-project
+          echo "Memulai build di Homeserver OmhcSilence — kompilasi APK..."
+          BUILD_MODE="${{ env.build_type }}"
+          if [ "$BUILD_MODE" = "release" ]; then
+            flutter build apk --release 2>&1 | tee build.log
+          else
+            flutter build apk --debug 2>&1 | tee build.log
+          fi
+          # Check if APK exists
+          APK_PATH=$(find build/app/outputs/flutter-apk -name "*.apk" 2>/dev/null | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "Build APK tidak ditemukan — bot's auto-fix akan menganalisis dan rebuild"
+            exit 1
+          fi
+          echo "APK sukses di-build: $APK_PATH"
+
       - name: Verify Flutter APK signature
         if: env.type == 'flutter' && env.build_type == 'release'
         run: |
           APK_PATH=$(find flutter-project/build/app/outputs/flutter-apk -name "*.apk" | head -n 1)
           if [ -f "$APK_PATH" ]; then
-            echo "Verifikasi tanda tangan Flutter Release:"
-            $ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools | sort -V | tail -n1)/apksigner verify "$APK_PATH"
-          else
-            echo "APK Flutter release tidak ditemukan"
-            exit 1
+            $ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools | sort -V | tail -n1)/apksigner verify "$APK_PATH" || \
+              $ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools | sort -V | tail -n1)/apksigner sign --ks release.keystore --ks-pass pass:password --key-pass pass:password "$APK_PATH"
           fi
 
-      # ---------- UPLOAD ----------
+      # ============================================================ UPLOAD ==
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
