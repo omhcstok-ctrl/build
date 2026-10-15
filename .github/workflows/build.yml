@@ -732,6 +732,231 @@ jobs:
           fi
 
       # ============================================================
+      #  FLUTTER - DEEP FIX: Rewrite build.gradle(.kts) from scratch
+      #  v3.2.3: If the existing build.gradle.kts has syntax errors (e.g.
+      #  "Build file '...' line: 18"), the sed-based fix above won't help
+      #  because it only replaces existing patterns — it can't ADD missing
+      #  blocks or fix malformed syntax.
+      #
+      #  This step extracts applicationId / versionCode / versionName from
+      #  the existing file (or infers them from pubspec.yaml) and writes a
+      #  FRESH, known-good build.gradle.kts (or .gradle) template.
+      # ============================================================
+      - name: Deep fix Flutter Android config (rewrite from scratch)
+        if: env.type == 'flutter'
+        shell: bash
+        run: |
+          cd flutter-project/android/app
+
+          echo "=== Deep fix: rewriting build.gradle(.kts) with known-good template ==="
+
+          # ── 1. Extract applicationId / versionCode / versionName ──────────
+          APP_ID=""
+          VER_CODE=""
+          VER_NAME=""
+
+          # Try from build.gradle.kts first
+          if [ -f build.gradle.kts ]; then
+            APP_ID=$(grep -oE 'applicationId\s*=\s*"[^"]+"' build.gradle.kts | head -n1 | sed 's/.*"\([^"]*\)".*/\1/' || true)
+            VER_CODE=$(grep -oE 'versionCode\s*=\s*[0-9]+' build.gradle.kts | head -n1 | grep -oE '[0-9]+' || true)
+            VER_NAME=$(grep -oE 'versionName\s*=\s*"[^"]+"' build.gradle.kts | head -n1 | sed 's/.*"\([^"]*\)".*/\1/' || true)
+          fi
+
+          # Fallback: try from build.gradle (Groovy)
+          if [ -z "$APP_ID" ] && [ -f build.gradle ]; then
+            APP_ID=$(grep -oE 'applicationId\s+"[^"]+"' build.gradle | head -n1 | sed 's/.*"\([^"]*\)".*/\1/' || true)
+            VER_CODE=$(grep -oE 'versionCode\s+[0-9]+' build.gradle | head -n1 | grep -oE '[0-9]+' || true)
+            VER_NAME=$(grep -oE 'versionName\s+"[^"]+"' build.gradle | head -n1 | sed 's/.*"\([^"]*\)".*/\1/' || true)
+          fi
+
+          # Fallback: infer from pubspec.yaml
+          PUBSPEC="../../pubspec.yaml"
+          if [ -f "$PUBSPEC" ]; then
+            if [ -z "$VER_CODE" ] || [ -z "$VER_NAME" ]; then
+              PUB_VER=$(grep -E '^version:' "$PUBSPEC" | head -n1 | sed 's/^version:[[:space:]]*//' || true)
+              # pubspec version format: X.Y.Z+N  → versionName=X.Y.Z, versionCode=N
+              if [ -n "$PUB_VER" ]; then
+                PUB_VER_NAME=$(echo "$PUB_VER" | sed 's/+.*//' || true)
+                PUB_VER_CODE=$(echo "$PUB_VER" | sed 's/.*+//' || true)
+                [ -z "$VER_NAME" ] && VER_NAME="$PUB_VER_NAME"
+                [ -z "$VER_CODE" ] && VER_CODE="$PUB_VER_CODE"
+              fi
+            fi
+            # Infer applicationId from pubspec name
+            if [ -z "$APP_ID" ]; then
+              PUB_NAME=$(grep -E '^name:' "$PUBSPEC" | head -n1 | sed 's/^name:[[:space:]]*//' | tr -d '"' || true)
+              if [ -n "$PUB_NAME" ]; then
+                # Convert snake_case to com.example.snake_case
+                APP_ID="com.example.${PUB_NAME}"
+              fi
+            fi
+          fi
+
+          # Final defaults
+          [ -z "$APP_ID" ] && APP_ID="com.example.app"
+          [ -z "$VER_CODE" ] && VER_CODE="1"
+          [ -z "$VER_NAME" ] && VER_NAME="1.0.0"
+          echo "Extracted: applicationId=$APP_ID  versionCode=$VER_CODE  versionName=$VER_NAME"
+
+          # ── 2. Detect Flutter Gradle plugin variant ───────────────────────
+          # Flutter 3.16+ uses: id("dev.flutter.flutter-gradle-plugin")
+          # Older Flutter uses: flutter { source = "../.." }  (bottom of file)
+          # Check settings.gradle.kts to see which variant the project uses.
+          SETTINGS_FILE="../settings.gradle.kts"
+          SETTINGS_GROOVY="../settings.gradle"
+          USE_FLUTTER_PLUGIN=false
+          if [ -f "$SETTINGS_FILE" ]; then
+            if grep -q 'dev.flutter.flutter-gradle-plugin' "$SETTINGS_FILE"; then
+              USE_FLUTTER_PLUGIN=true
+            fi
+          elif [ -f "$SETTINGS_GROOVY" ]; then
+            if grep -q 'dev.flutter.flutter-gradle-plugin' "$SETTINGS_GROOVY"; then
+              USE_FLUTTER_PLUGIN=true
+            fi
+          fi
+
+          # ── 3. Write FRESH build.gradle.kts (Kotlin DSL) ──────────────────
+          # This is a known-good template that works with AGP 8.x + Flutter.
+          cat > build.gradle.kts << GRADLE_KTS
+plugins {
+    id("com.android.application")
+    id("kotlin-android")
+$(if [ "$USE_FLUTTER_PLUGIN" = "true" ]; then echo '    id("dev.flutter.flutter-gradle-plugin")'; fi)
+}
+
+android {
+    namespace = "${APP_ID}"
+    compileSdk = 35
+
+    defaultConfig {
+        applicationId = "${APP_ID}"
+        minSdk = 21
+        targetSdk = 34
+        versionCode = ${VER_CODE}
+        versionName = "${VER_NAME}"
+    }
+
+    signingConfigs {
+        create("release") {
+            storeFile = file("release.keystore")
+            storePassword = "password"
+            keyAlias = "release"
+            keyPassword = "password"
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig = signingConfigs.getByName("release")
+            isMinifyEnabled = false
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+}
+GRADLE_KTS
+
+          # If NOT using the Flutter Gradle plugin, add the flutter source block at the bottom
+          if [ "$USE_FLUTTER_PLUGIN" = "false" ]; then
+            echo '' >> build.gradle.kts
+            echo 'flutter {' >> build.gradle.kts
+            echo '    source = "../.."' >> build.gradle.kts
+            echo '}' >> build.gradle.kts
+          fi
+
+          echo "✅ Wrote fresh build.gradle.kts (known-good template)"
+          echo "--- Preview ---"
+          cat build.gradle.kts
+          echo "--- End preview ---"
+
+          # ── 4. Also ensure proguard-rules.pro exists (referenced by template) ─
+          if [ ! -f proguard-rules.pro ]; then
+            echo "# Add project specific ProGuard rules here." > proguard-rules.pro
+            echo "✅ Created empty proguard-rules.pro"
+          fi
+
+          # ── 5. Ensure release.keystore is copied ──────────────────────────
+          if [ ! -f release.keystore ]; then
+            cp ../../../release.keystore . 2>/dev/null || true
+          fi
+
+          # ── 6. Also fix root settings.gradle.kts if it's missing Flutter plugin ─
+          SETTINGS_KTS="../settings.gradle.kts"
+          if [ -f "$SETTINGS_KTS" ]; then
+            if ! grep -q 'dev.flutter.flutter-gradle-plugin' "$SETTINGS_KTS" && \
+               ! grep -q 'flutter.gradle' "$SETTINGS_KTS"; then
+              echo "⚠️ settings.gradle.kts doesn't reference Flutter plugin — project may use flutter { source } block instead"
+            fi
+            # Ensure pluginManagement + dependencyResolutionManagement blocks exist
+            if ! grep -q 'pluginManagement' "$SETTINGS_KTS"; then
+              cat > "$SETTINGS_KTS" << SETTINGS_KTS_NEW
+pluginManagement {
+    val flutterSdkPath = run {
+        val properties = java.util.Properties()
+        file("local.properties").inputStream().use { properties.load(it) }
+        properties.getProperty("flutter.sdk")
+            ?: throw RuntimeException("flutter.sdk not set in local.properties")
+    }
+    includeBuild("\$flutterSdkPath/packages/flutter_tools/gradle")
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+plugins {
+    id("dev.flutter.flutter-plugin-loader") version "1.0.0"
+    id("com.android.application") version "8.7.3" apply false
+    id("org.jetbrains.kotlin.android") version "2.1.0" apply false
+}
+
+include(":app")
+SETTINGS_KTS_NEW
+              echo "✅ Wrote fresh settings.gradle.kts"
+            fi
+          fi
+
+          # ── 7. Also fix root build.gradle.kts ──────────────────────────────
+          ROOT_GRADLE_KTS="../build.gradle.kts"
+          if [ -f "$ROOT_GRADLE_KTS" ]; then
+            # Only rewrite if it's essentially empty or broken
+            LINES=$(wc -l < "$ROOT_GRADLE_KTS" 2>/dev/null || echo 0)
+            if [ "$LINES" -lt 5 ]; then
+              cat > "$ROOT_GRADLE_KTS" << ROOT_KTS
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+val newBuildDir: Directory = rootProject.layout.buildDirectory.dir("../../build").get()
+rootProject.layout.buildDirectory.value(newBuildDir)
+
+subprojects {
+    val newBuildDir: Directory = rootProject.layout.buildDirectory.dir(project.name).get()
+    project.layout.buildDirectory.value(newBuildDir)
+}
+subprojects {
+    project.evaluationDependsOn(":app")
+}
+ROOT_KTS
+              echo "✅ Wrote fresh root build.gradle.kts"
+            fi
+          fi
+
+          echo "=== Deep fix complete ==="
+
+      # ============================================================
       #  FLUTTER - AUTO-DETECT FLUTTER VERSION FROM pubspec.yaml
       # ============================================================
       - name: Auto-detect Flutter version from pubspec.yaml
