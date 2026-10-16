@@ -541,6 +541,94 @@ jobs:
             exit 1
           fi
 
+      # ============================================================
+      #  FLUTTER - VALIDATE PROJECT STRUCTURE
+      #  v3.3.1: Early validation to catch issues before wasting time
+      #  on Flutter SDK setup, pub get, etc.
+      # ============================================================
+      - name: Validate Flutter project structure
+        if: env.type == 'flutter'
+        run: |
+          echo "=== Validating Flutter project structure ==="
+          cd flutter-project
+
+          # Check pubspec.yaml
+          if [ ! -f pubspec.yaml ]; then
+            echo "❌ FATAL: pubspec.yaml tidak ditemukan!"
+            exit 1
+          fi
+          echo "✅ pubspec.yaml found"
+
+          # Check lib/ directory
+          if [ ! -d lib ]; then
+            echo "❌ FATAL: lib/ directory tidak ditemukan!"
+            exit 1
+          fi
+          echo "✅ lib/ directory found"
+
+          # Check main.dart
+          MAIN_DART=""
+          for candidate in lib/main.dart lib/main_web.dart lib/main_mobile.dart; do
+            if [ -f "$candidate" ]; then
+              MAIN_DART="$candidate"
+              break
+            fi
+          done
+          if [ -z "$MAIN_DART" ]; then
+            echo "⚠️ WARNING: main.dart tidak ditemukan di lib/"
+            echo "   Files di lib/:"
+            find lib/ -name "*.dart" -maxdepth 2 | head -10
+          else
+            echo "✅ Entry point found: $MAIN_DART"
+          fi
+
+          # Check android/ directory
+          if [ ! -d android ]; then
+            echo "⚠️ WARNING: android/ directory tidak ditemukan"
+            echo "   Bot akan generate Android config dari pubspec.yaml"
+          else
+            echo "✅ android/ directory found"
+            if [ -f android/app/build.gradle.kts ]; then
+              echo "✅ android/app/build.gradle.kts found (Kotlin DSL)"
+            elif [ -f android/app/build.gradle ]; then
+              echo "✅ android/app/build.gradle found (Groovy)"
+            else
+              echo "⚠️ WARNING: Tidak ada build.gradle atau build.gradle.kts di android/app/"
+            fi
+            if [ -f android/settings.gradle.kts ]; then
+              echo "✅ android/settings.gradle.kts found"
+            elif [ -f android/settings.gradle ]; then
+              echo "✅ android/settings.gradle found"
+            else
+              echo "⚠️ WARNING: Tidak ada settings.gradle di android/"
+            fi
+          fi
+
+          # Check assets referenced in pubspec
+          echo ""
+          echo "=== Asset files check ==="
+          grep -E '^\s+-\s+assets/' pubspec.yaml 2>/dev/null | sed 's/.*- //' | while read -r ASSET; do
+            if [ -f "$ASSET" ]; then
+              echo "✅ $ASSET"
+            else
+              echo "⚠️ MISSING: $ASSET"
+            fi
+          done
+
+          # Check fonts referenced in pubspec
+          echo ""
+          echo "=== Font files check ==="
+          grep -E '^\s+-\s+asset:\s+fonts/' pubspec.yaml 2>/dev/null | sed 's/.*asset: //' | while read -r FONT; do
+            if [ -f "$FONT" ]; then
+              echo "✅ $FONT"
+            else
+              echo "⚠️ MISSING: $FONT"
+            fi
+          done
+
+          echo ""
+          echo "=== Validation complete ==="
+
       - name: Auto-detect icon from user Flutter project
         if: env.type == 'flutter'
         run: |
@@ -652,138 +740,100 @@ jobs:
 
           echo "Icon Flutter siap (legacy + adaptive)"
 
-      - name: Deep fix Flutter Android config
+      # ============================================================
+      #  FLUTTER - FIX ANDROID CONFIG (conservative sed-based fixes)
+      #  v3.3.1: Removed "Deep fix" rewrite-from-scratch (too aggressive).
+      #  Now only patches specific values in existing build.gradle(.kts).
+      # ============================================================
+      - name: Fix Flutter Android config + signing
         if: env.type == 'flutter'
-        shell: bash
         run: |
           cd flutter-project/android/app
           cp ../../../release.keystore .
 
-          echo "=== Deep fix: rewriting build.gradle(.kts) with known-good template ==="
-
-          APP_ID=""
-          VER_CODE=""
-          VER_NAME=""
-
+          # Patch existing build.gradle.kts (Kotlin DSL) or build.gradle (Groovy)
           if [ -f build.gradle.kts ]; then
-            APP_ID=$(grep -oE 'applicationId\s*=\s*"[^"]+"' build.gradle.kts | head -n1 | sed 's/.*"\([^"]*\)".*/\1/' || true)
-            VER_CODE=$(grep -oE 'versionCode\s*=\s*[0-9]+' build.gradle.kts | head -n1 | grep -oE '[0-9]+' || true)
-            VER_NAME=$(grep -oE 'versionName\s*=\s*"[^"]+"' build.gradle.kts | head -n1 | sed 's/.*"\([^"]*\)".*/\1/' || true)
+            echo "Patching build.gradle.kts..."
+            sed -i 's/compileSdk[[:space:]]*=[[:space:]]*[0-9]*/compileSdk = 35/g' build.gradle.kts
+            sed -i 's/targetSdk[[:space:]]*=[[:space:]]*[0-9]*/targetSdk = 34/g' build.gradle.kts
+            sed -i 's/minSdk[[:space:]]*=[[:space:]]*[0-9]*/minSdk = 21/g' build.gradle.kts
+            sed -i 's|sourceCompatibility[[:space:]]*=[[:space:]]*JavaVersion\.VERSION_[0-9]*|sourceCompatibility = JavaVersion.VERSION_17|g' build.gradle.kts
+            sed -i 's|targetCompatibility[[:space:]]*=[[:space:]]*JavaVersion\.VERSION_[0-9]*|targetCompatibility = JavaVersion.VERSION_17|g' build.gradle.kts
+            sed -i 's|storeFile[[:space:]]*=[[:space:]]*file(".*")|storeFile = file("release.keystore")|g' build.gradle.kts
+            sed -i 's|storeFile\.set(file(".*"))|storeFile.set(file("release.keystore"))|g' build.gradle.kts
+            sed -i 's|storePassword[[:space:]]*=[[:space:]]*".*"|storePassword = "password"|g' build.gradle.kts
+            sed -i 's|storePassword\.set(".*")|storePassword.set("password")|g' build.gradle.kts
+            sed -i 's|keyAlias[[:space:]]*=[[:space:]]*".*"|keyAlias = "release"|g' build.gradle.kts
+            sed -i 's|keyAlias\.set(".*")|keyAlias.set("release")|g' build.gradle.kts
+            sed -i 's|keyPassword[[:space:]]*=[[:space:]]*".*"|keyPassword = "password"|g' build.gradle.kts
+            sed -i 's|keyPassword\.set(".*")|keyPassword.set("password")|g' build.gradle.kts
+          elif [ -f build.gradle ]; then
+            echo "Patching build.gradle (Groovy)..."
+            sed -i 's/compileSdk[[:space:]]*[0-9]*/compileSdk 35/g' build.gradle
+            sed -i 's/targetSdk[[:space:]]*[0-9]*/targetSdk 34/g' build.gradle
+            sed -i 's/minSdk[[:space:]]*[0-9]*/minSdk 21/g' build.gradle
+            sed -i 's|sourceCompatibility[[:space:]]*JavaVersion\.VERSION_[0-9]*|sourceCompatibility JavaVersion.VERSION_17|g' build.gradle
+            sed -i 's|targetCompatibility[[:space:]]*JavaVersion\.VERSION_[0-9]*|targetCompatibility JavaVersion.VERSION_17|g' build.gradle
+            sed -i 's|storeFile[[:space:]]*file(".*")|storeFile file("release.keystore")|g' build.gradle
+            sed -i 's|storePassword[[:space:]]*".*"|storePassword "password"|g' build.gradle
+            sed -i 's|keyAlias[[:space:]]*".*"|keyAlias "release"|g' build.gradle
+            sed -i 's|keyPassword[[:space:]]*".*"|keyPassword "password"|g' build.gradle
+          else
+            echo "⚠️ build.gradle / build.gradle.kts tidak ditemukan di android/app/"
+            ls -la
           fi
 
-          if [ -z "$APP_ID" ] && [ -f build.gradle ]; then
-            APP_ID=$(grep -oE 'applicationId\s+"[^"]+"' build.gradle | head -n1 | sed 's/.*"\([^"]*\)".*/\1/' || true)
-            VER_CODE=$(grep -oE 'versionCode\s+[0-9]+' build.gradle | head -n1 | grep -oE '[0-9]+' || true)
-            VER_NAME=$(grep -oE 'versionName\s+"[^"]+"' build.gradle | head -n1 | sed 's/.*"\([^"]*\)".*/\1/' || true)
-          fi
-
-          PUBSPEC="../../pubspec.yaml"
-          if [ -f "$PUBSPEC" ]; then
-            if [ -z "$VER_CODE" ] || [ -z "$VER_NAME" ]; then
-              PUB_VER=$(grep -E '^version:' "$PUBSPEC" | head -n1 | sed 's/^version:[[:space:]]*//' || true)
-              if [ -n "$PUB_VER" ]; then
-                PUB_VER_NAME=$(echo "$PUB_VER" | sed 's/+.*//' || true)
-                PUB_VER_CODE=$(echo "$PUB_VER" | sed 's/.*+//' || true)
-                [ -z "$VER_NAME" ] && VER_NAME="$PUB_VER_NAME"
-                [ -z "$VER_CODE" ] && VER_CODE="$PUB_VER_CODE"
-              fi
-            fi
-            if [ -z "$APP_ID" ]; then
-              PUB_NAME=$(grep -E '^name:' "$PUBSPEC" | head -n1 | sed 's/^name:[[:space:]]*//' | tr -d '"' || true)
-              if [ -n "$PUB_NAME" ]; then
-                APP_ID="com.example.${PUB_NAME}"
-              fi
-            fi
-          fi
-
-          [ -z "$APP_ID" ] && APP_ID="com.example.app"
-          [ -z "$VER_CODE" ] && VER_CODE="1"
-          [ -z "$VER_NAME" ] && VER_NAME="1.0.0"
-          echo "Extracted: applicationId=$APP_ID  versionCode=$VER_CODE  versionName=$VER_NAME"
-
-          SETTINGS_FILE="../settings.gradle.kts"
-          SETTINGS_GROOVY="../settings.gradle"
-          USE_FLUTTER_PLUGIN=false
-          if [ -f "$SETTINGS_FILE" ]; then
-            if grep -q 'dev.flutter.flutter-gradle-plugin' "$SETTINGS_FILE"; then
-              USE_FLUTTER_PLUGIN=true
-            fi
-          elif [ -f "$SETTINGS_GROOVY" ]; then
-            if grep -q 'dev.flutter.flutter-gradle-plugin' "$SETTINGS_GROOVY" ]; then
-              USE_FLUTTER_PLUGIN=true
-            fi
-          fi
-
-          cat > build.gradle.kts << GRADLE_KTS
-plugins {
-    id("com.android.application")
-    id("kotlin-android")
-$(if [ "$USE_FLUTTER_PLUGIN" = "true" ]; then echo '    id("dev.flutter.flutter-gradle-plugin")'; fi)
-}
-
-android {
-    namespace = "${APP_ID}"
-    compileSdk = 35
-
-    defaultConfig {
-        applicationId = "${APP_ID}"
-        minSdk = 21
-        targetSdk = 34
-        versionCode = ${VER_CODE}
-        versionName = "${VER_NAME}"
-    }
-
-    signingConfigs {
-        create("release") {
-            storeFile = file("release.keystore")
-            storePassword = "password"
-            keyAlias = "release"
-            keyPassword = "password"
-        }
-    }
-
-    buildTypes {
-        release {
-            signingConfig = signingConfigs.getByName("release")
-            isMinifyEnabled = false
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-        }
-    }
-
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-}
-GRADLE_KTS
-
-          if [ "$USE_FLUTTER_PLUGIN" = "false" ]; then
-            echo '' >> build.gradle.kts
-            echo 'flutter {' >> build.gradle.kts
-            echo '    source = "../.."' >> build.gradle.kts
-            echo '}' >> build.gradle.kts
-          fi
-
-          echo "✅ Wrote fresh build.gradle.kts"
-
-          if [ ! -f proguard-rules.pro ]; then
-            echo "# Add project specific ProGuard rules here." > proguard-rules.pro
-          fi
-
-          if [ ! -f release.keystore ]; then
-            cp ../../../release.keystore . 2>/dev/null || true
-          fi
-
+          # gradle.properties — JVM heap + AndroidX
           PROPS="../gradle.properties"
           if [ -f "$PROPS" ]; then
             grep -q 'org.gradle.jvmargs' "$PROPS" || echo 'org.gradle.jvmargs=-Xmx2g' >> "$PROPS"
             grep -q 'android.useAndroidX' "$PROPS" || echo 'android.useAndroidX=true' >> "$PROPS"
             grep -q 'android.enableJetifier' "$PROPS" || echo 'android.enableJetifier=true' >> "$PROPS"
           fi
+
+          echo "=== Android config patched ==="
+
+      - name: Diagnostic info
+        if: env.type == 'flutter'
+        run: |
+          echo "═══════════════════════════════════════════════════"
+          echo "  DIAGNOSTIC INFO — Homeserver OmhcSilence"
+          echo "═══════════════════════════════════════════════════"
+          echo ""
+          echo "=== Environment ==="
+          echo "Build type: ${{ env.build_type }}"
+          echo "Runner OS: $(uname -a)"
+          echo "Disk space:"
+          df -h / | tail -1
+          echo ""
+          echo "=== Flutter project structure ==="
+          cd flutter-project
+          echo "pubspec.yaml exists: $([ -f pubspec.yaml ] && echo YES || echo NO)"
+          echo "lib/main.dart exists: $([ -f lib/main.dart ] && echo YES || echo NO)"
+          echo "android/ exists: $([ -d android ] && echo YES || echo NO)"
+          echo "android/app/build.gradle.kts exists: $([ -f android/app/build.gradle.kts ] && echo YES || echo NO)"
+          echo "android/app/build.gradle exists: $([ -f android/app/build.gradle ] && echo YES || echo NO)"
+          echo "android/settings.gradle.kts exists: $([ -f android/settings.gradle.kts ] && echo YES || echo NO)"
+          echo ""
+          echo "=== pubspec.yaml (first 30 lines) ==="
+          head -30 pubspec.yaml || true
+          echo ""
+          echo "=== SDK constraint ==="
+          grep -A2 '^environment:' pubspec.yaml || true
+          echo ""
+          echo "=== Key dependencies ==="
+          grep -E 'flutter_lints:|shimmer:|flutter_sound:|webview_flutter:|audioplayers:|permission_handler:|flutter_launcher_icons:' pubspec.yaml || true
+          echo ""
+          echo "=== android/app/build.gradle.kts (if exists) ==="
+          cat android/app/build.gradle.kts 2>/dev/null | head -40 || echo "NOT FOUND"
+          echo ""
+          echo "=== android/app/build.gradle (if exists) ==="
+          cat android/app/build.gradle 2>/dev/null | head -40 || echo "NOT FOUND"
+          echo ""
+          echo "=== Icon files found ==="
+          find assets/ android/app/src/main/res/mipmap-*/ -name "*.png" -o -name "*.jpg" -o -name "*.webp" 2>/dev/null | head -20 || echo "No icons found"
+          echo ""
+          echo "═══════════════════════════════════════════════════"
 
       - name: Auto-detect Flutter version from pubspec.yaml
         if: env.type == 'flutter'
