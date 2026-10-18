@@ -46,6 +46,18 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
 
+      # v3.3.4: Install NDK — many Flutter plugins (flutter_webrtc, audioplayers,
+      # record, etc.) need native compilation. Without NDK, build fails with
+      # "No version of NDK matched". Install a commonly available version.
+      - name: Install Android NDK
+        run: |
+          echo "Installing NDK 27.0.12077973 (latest stable)..."
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "ndk;27.0.12077973" > /dev/null 2>&1 || true
+          sdkmanager "cmake;3.22.1" > /dev/null 2>&1 || true
+          echo "NDK installation attempted. Available NDKs:"
+          ls $ANDROID_HOME/ndk/ 2>/dev/null || echo "(none found)"
+
       - name: Install dependencies (ImageMagick, jq, unzip, curl)
         run: sudo apt-get update && sudo apt-get install -y imagemagick jq unzip curl
 
@@ -484,23 +496,119 @@ jobs:
         run: |
           sed -i "s|URL_PLACEHOLDER|${{ env.url }}|g" project/app/src/main/java/com/web2apk/app/MainActivity.java
           sed -i "s|<string name=\"app_name\">.*</string>|<string name=\"app_name\">${{ env.app_name }}</string>|g" project/app/src/main/res/values/strings.xml
-          if [ ! -f build-assets/icon.png ] || ! file build-assets/icon.png | grep -q PNG; then
-            echo "Icon tidak valid, membuat default..."
-            convert -size 512x512 xc:blue build-assets/icon.png
+
+          # ─── ICON PROCESSING (v3.3.3 — support all Android 5.0–16) ──────
+          # User-sent icon is at build-assets/icon.png (uploaded by bot via
+          # triggerWeb2ApkBuild). If missing/invalid, generate Flutter default.
+          ICON_SRC=""
+          if [ -f build-assets/icon.png ]; then
+            FMT=$(file build-assets/icon.png | grep -oiE 'PNG|JPEG|JPG' | head -n1)
+            if [ -n "$FMT" ]; then
+              SRC_W=$(identify -format '%w' build-assets/icon.png 2>/dev/null || echo 0)
+              SRC_H=$(identify -format '%h' build-assets/icon.png 2>/dev/null || echo 0)
+              if [ "$SRC_W" -ge 48 ] && [ "$SRC_H" -ge 48 ]; then
+                echo "✅ Using user-sent icon: build-assets/icon.png (${SRC_W}x${SRC_H}, $FMT)"
+                ICON_SRC="build-assets/icon.png"
+              else
+                echo "⚠️ User icon too small (${SRC_W}x${SRC_H}), generating default"
+              fi
+            else
+              echo "⚠️ User icon format unknown, generating default"
+            fi
           fi
-          mkdir -p project/app/src/main/res/mipmap-hdpi project/app/src/main/res/mipmap-mdpi project/app/src/main/res/mipmap-xhdpi project/app/src/main/res/mipmap-xxhdpi project/app/src/main/res/mipmap-xxxhdpi
-          convert build-assets/icon.png -resize 72x72 project/app/src/main/res/mipmap-hdpi/ic_launcher.png
-          convert build-assets/icon.png -resize 48x48 project/app/src/main/res/mipmap-mdpi/ic_launcher.png
-          convert build-assets/icon.png -resize 96x96 project/app/src/main/res/mipmap-xhdpi/ic_launcher.png
-          convert build-assets/icon.png -resize 144x144 project/app/src/main/res/mipmap-xxhdpi/ic_launcher.png
-          convert build-assets/icon.png -resize 192x192 project/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
-          cp project/app/src/main/res/mipmap-hdpi/ic_launcher.png project/app/src/main/res/mipmap-hdpi/ic_launcher_round.png
-          cp project/app/src/main/res/mipmap-mdpi/ic_launcher.png project/app/src/main/res/mipmap-mdpi/ic_launcher_round.png
-          cp project/app/src/main/res/mipmap-xhdpi/ic_launcher.png project/app/src/main/res/mipmap-xhdpi/ic_launcher_round.png
-          cp project/app/src/main/res/mipmap-xxhdpi/ic_launcher.png project/app/src/main/res/mipmap-xxhdpi/ic_launcher_round.png
-          cp project/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png project/app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png
+
+          # If no valid user icon → generate Flutter-style default (Flutter blue + "App" text)
+          if [ -z "$ICON_SRC" ]; then
+            echo "Generating Flutter default icon (512x512, Flutter blue background)..."
+            convert -size 512x512 xc:"#02569B" \
+              -fill white -gravity center -pointsize 280 -annotate +0+0 "App" \
+              build-assets/icon.png 2>/dev/null || \
+            convert -size 512x512 xc:"#02569B" build-assets/icon.png
+            ICON_SRC="build-assets/icon.png"
+          fi
+
+          # Normalize: ensure PNG, square it up if non-square (pad transparent)
+          mkdir -p /tmp/icon-work
+          convert "$ICON_SRC" -strip -define png:exclude-chunk=all /tmp/icon-work/source.png
+          if [ $? -ne 0 ] || ! file /tmp/icon-work/source.png | grep -q PNG; then
+            echo "Icon conversion failed, using solid color fallback"
+            convert -size 512x512 xc:"#02569B" /tmp/icon-work/source.png
+          fi
+
+          SRC_W=$(identify -format '%w' /tmp/icon-work/source.png 2>/dev/null || echo 0)
+          SRC_H=$(identify -format '%h' /tmp/icon-work/source.png 2>/dev/null || echo 0)
+          if [ "$SRC_W" -gt 0 ] && [ "$SRC_H" -gt 0 ] && [ "$SRC_W" != "$SRC_H" ]; then
+            echo "Icon non-square (${SRC_W}x${SRC_H}), padding to square..."
+            MAX_DIM=$((SRC_W > SRC_H ? SRC_W : SRC_H))
+            convert /tmp/icon-work/source.png -resize ${MAX_DIM}x${MAX_DIM} \
+              -background none -gravity center -extent ${MAX_DIM}x${MAX_DIM} \
+              /tmp/icon-work/source_square.png
+            cp /tmp/icon-work/source_square.png /tmp/icon-work/source.png
+          fi
+
+          ICON_SRC=/tmp/icon-work/source.png
+          echo "Final icon source: $ICON_SRC ($(identify -format '%wx%h' $ICON_SRC))"
+
+          # ─── LEGACY ICONS (mipmap-*/ic_launcher.png) — Android < 8 ──────
+          mkdir -p project/app/src/main/res/mipmap-hdpi
+          mkdir -p project/app/src/main/res/mipmap-mdpi
+          mkdir -p project/app/src/main/res/mipmap-xhdpi
+          mkdir -p project/app/src/main/res/mipmap-xxhdpi
+          mkdir -p project/app/src/main/res/mipmap-xxxhdpi
+
+          convert $ICON_SRC -resize 72x72   -strip project/app/src/main/res/mipmap-hdpi/ic_launcher.png
+          convert $ICON_SRC -resize 48x48   -strip project/app/src/main/res/mipmap-mdpi/ic_launcher.png
+          convert $ICON_SRC -resize 96x96  -strip project/app/src/main/res/mipmap-xhdpi/ic_launcher.png
+          convert $ICON_SRC -resize 144x144 -strip project/app/src/main/res/mipmap-xxhdpi/ic_launcher.png
+          convert $ICON_SRC -resize 192x192 -strip project/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+
+          # Round icons (copy of legacy)
+          for dir in mipmap-hdpi mipmap-mdpi mipmap-xhdpi mipmap-xxhdpi mipmap-xxxhdpi; do
+            cp project/app/src/main/res/$dir/ic_launcher.png project/app/src/main/res/$dir/ic_launcher_round.png
+          done
+
+          # ─── ADAPTIVE ICONS (mipmap-anydpi-v26) — Android 8.0+ (API 26+) ─
+          # CRITICAL: Without this, app will force close on Android 8+ because
+          # the launcher expects adaptive icon format.
+          #
+          # Adaptive icon = foreground (icon with padding) + background (color)
+          # Spec: full canvas 108dp, safe zone 66dp (centered)
+          mkdir -p project/app/src/main/res/mipmap-anydpi-v26
+
+          ADAPTIVE_XML='<?xml version="1.0" encoding="utf-8"?><adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android"><background android:drawable="@color/ic_launcher_background"/><foreground android:drawable="@mipmap/ic_launcher_foreground"/></adaptive-icon>'
+          printf '%s' "$ADAPTIVE_XML" > project/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+          printf '%s' "$ADAPTIVE_XML" > project/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
+
+          # Generate foreground PNGs (icon centered with 12.5% padding on each side)
+          # Foreground canvas = full density size, icon = 67% of canvas (safe zone)
+          for dir_size in "mipmap-mdpi:48" "mipmap-hdpi:72" "mipmap-xhdpi:96" "mipmap-xxhdpi:144" "mipmap-xxxhdpi:192"; do
+            dir="${dir_size%%:*}"
+            size="${dir_size##*:}"
+            mkdir -p project/app/src/main/res/$dir
+            FG_SIZE=$((size * 67 / 100))
+            echo "Generating foreground: $dir → ${FG_SIZE}x${FG_SIZE} icon on ${size}x${size} canvas"
+            convert $ICON_SRC -resize ${FG_SIZE}x${FG_SIZE} -strip \
+              -background none -gravity center -extent ${size}x${size} \
+              project/app/src/main/res/$dir/ic_launcher_foreground.png
+          done
+
+          # Background color resource
+          mkdir -p project/app/src/main/res/values
+          if [ ! -f project/app/src/main/res/values/ic_launcher_colors.xml ]; then
+            COLORS_XML='<?xml version="1.0" encoding="utf-8"?><resources><color name="ic_launcher_background">#070D17</color></resources>'
+            printf '%s' "$COLORS_XML" > project/app/src/main/res/values/ic_launcher_colors.xml
+            echo "✅ Created ic_launcher_colors.xml (background #070D17)"
+          fi
+
+          echo "✅ All icons generated (legacy + adaptive)"
+          echo "  Legacy: mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher.png + ic_launcher_round.png"
+          echo "  Adaptive: mipmap-anydpi-v26/ic_launcher.xml + ic_launcher_round.xml"
+          echo "  Foreground: mipmap-*/ic_launcher_foreground.png (all densities)"
+
+          # ─── KEYSTORE ─────────────────────────────────────────────────────
           rm -f project/app/debug.keystore
           keytool -genkey -v -keystore project/app/debug.keystore -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=Android Debug, O=Android, C=US"
+          echo "✅ Keystore generated"
 
       - name: Web2APK - Build
         if: env.type == 'web2apk'
@@ -751,42 +859,106 @@ jobs:
           cd flutter-project/android/app
           cp ../../../release.keystore .
 
-          # Patch existing build.gradle.kts (Kotlin DSL) or build.gradle (Groovy)
+          # v3.3.4: Smart patching — only UPGRADE values, never downgrade.
+          # Also handle ndkVersion (common cause of build failure on CI).
           if [ -f build.gradle.kts ]; then
-            echo "Patching build.gradle.kts..."
-            sed -i 's/compileSdk[[:space:]]*=[[:space:]]*[0-9]*/compileSdk = 35/g' build.gradle.kts
-            sed -i 's/targetSdk[[:space:]]*=[[:space:]]*[0-9]*/targetSdk = 34/g' build.gradle.kts
-            sed -i 's/minSdk[[:space:]]*=[[:space:]]*[0-9]*/minSdk = 21/g' build.gradle.kts
+            echo "Patching build.gradle.kts (Kotlin DSL)..."
+
+            # ── compileSdk: only upgrade if < 35 (don't downgrade 36→35) ─────
+            CURRENT_CS=$(grep -oE 'compileSdk[[:space:]]*=[[:space:]]*[0-9]+' build.gradle.kts | grep -oE '[0-9]+' | head -n1 || echo 0)
+            if [ "$CURRENT_CS" -gt 0 ] && [ "$CURRENT_CS" -lt 35 ]; then
+              sed -i 's/compileSdk[[:space:]]*=[[:space:]]*[0-9]*/compileSdk = 35/g' build.gradle.kts
+              echo "  compileSdk upgraded: $CURRENT_CS → 35"
+            else
+              echo "  compileSdk = $CURRENT_CS (kept, already ≥ 35)"
+            fi
+
+            # ── targetSdk: only upgrade if < 34 ─────────────────────────────
+            CURRENT_TS=$(grep -oE 'targetSdk[[:space:]]*=[[:space:]]*[0-9]+' build.gradle.kts | grep -oE '[0-9]+' | head -n1 || echo 0)
+            if [ "$CURRENT_TS" -gt 0 ] && [ "$CURRENT_TS" -lt 34 ]; then
+              sed -i 's/targetSdk[[:space:]]*=[[:space:]]*[0-9]*/targetSdk = 34/g' build.gradle.kts
+              echo "  targetSdk upgraded: $CURRENT_TS → 34"
+            else
+              echo "  targetSdk = $CURRENT_TS (kept, already ≥ 34)"
+            fi
+
+            # ── minSdk: only lower if > 23 (geolocator/permission_handler need 23) ──
+            CURRENT_MS=$(grep -oE 'minSdk[[:space:]]*=[[:space:]]*[0-9]+' build.gradle.kts | grep -oE '[0-9]+' | head -n1 || echo 0)
+            if [ "$CURRENT_MS" -gt 0 ] && [ "$CURRENT_MS" -lt 16 ]; then
+              sed -i 's/minSdk[[:space:]]*=[[:space:]]*[0-9]*/minSdk = 21/g' build.gradle.kts
+              echo "  minSdk upgraded: $CURRENT_MS → 21"
+            else
+              echo "  minSdk = $CURRENT_MS (kept, already ≥ 16)"
+            fi
+
+            # ── ndkVersion: REMOVE it (common cause of "No version of NDK matched") ──
+            # The CI runner may not have the exact NDK version specified.
+            # Removing the line lets Gradle use whatever NDK is available.
+            if grep -q 'ndkVersion' build.gradle.kts; then
+              NDK_VER=$(grep -oE 'ndkVersion[[:space:]]*=[[:space:]]*"[^"]*"' build.gradle.kts | grep -oE '"[^"]*"' | tr -d '"')
+              echo "  ndkVersion = \"$NDK_VER\" → REMOVING (CI may not have this version)"
+              sed -i '/ndkVersion/d' build.gradle.kts
+            fi
+
+            # ── Java compatibility ──────────────────────────────────────────
             sed -i 's|sourceCompatibility[[:space:]]*=[[:space:]]*JavaVersion\.VERSION_[0-9]*|sourceCompatibility = JavaVersion.VERSION_17|g' build.gradle.kts
             sed -i 's|targetCompatibility[[:space:]]*=[[:space:]]*JavaVersion\.VERSION_[0-9]*|targetCompatibility = JavaVersion.VERSION_17|g' build.gradle.kts
-            sed -i 's|storeFile[[:space:]]*=[[:space:]]*file(".*")|storeFile = file("release.keystore")|g' build.gradle.kts
-            sed -i 's|storeFile\.set(file(".*"))|storeFile.set(file("release.keystore"))|g' build.gradle.kts
-            sed -i 's|storePassword[[:space:]]*=[[:space:]]*".*"|storePassword = "password"|g' build.gradle.kts
-            sed -i 's|storePassword\.set(".*")|storePassword.set("password")|g' build.gradle.kts
-            sed -i 's|keyAlias[[:space:]]*=[[:space:]]*".*"|keyAlias = "release"|g' build.gradle.kts
-            sed -i 's|keyAlias\.set(".*")|keyAlias.set("release")|g' build.gradle.kts
-            sed -i 's|keyPassword[[:space:]]*=[[:space:]]*".*"|keyPassword = "password"|g' build.gradle.kts
-            sed -i 's|keyPassword\.set(".*")|keyPassword.set("password")|g' build.gradle.kts
+
+            # ── Signing config: only patch if project has custom release config ──
+            # If project uses signingConfigs.getByName("debug"), leave it alone.
+            if grep -q 'storeFile.*file(' build.gradle.kts; then
+              echo "  Patching custom signing config..."
+              sed -i 's|storeFile[[:space:]]*=[[:space:]]*file(".*")|storeFile = file("release.keystore")|g' build.gradle.kts
+              sed -i 's|storeFile\.set(file(".*"))|storeFile.set(file("release.keystore"))|g' build.gradle.kts
+              sed -i 's|storePassword[[:space:]]*=[[:space:]]*".*"|storePassword = "password"|g' build.gradle.kts
+              sed -i 's|storePassword\.set(".*")|storePassword.set("password")|g' build.gradle.kts
+              sed -i 's|keyAlias[[:space:]]*=[[:space:]]*".*"|keyAlias = "release"|g' build.gradle.kts
+              sed -i 's|keyAlias\.set(".*")|keyAlias.set("release")|g' build.gradle.kts
+              sed -i 's|keyPassword[[:space:]]*=[[:space:]]*".*"|keyPassword = "password"|g' build.gradle.kts
+              sed -i 's|keyPassword\.set(".*")|keyPassword.set("password")|g' build.gradle.kts
+            else
+              echo "  Signing config uses getByName(\"debug\") — leaving as-is"
+            fi
+
           elif [ -f build.gradle ]; then
             echo "Patching build.gradle (Groovy)..."
-            sed -i 's/compileSdk[[:space:]]*[0-9]*/compileSdk 35/g' build.gradle
-            sed -i 's/targetSdk[[:space:]]*[0-9]*/targetSdk 34/g' build.gradle
-            sed -i 's/minSdk[[:space:]]*[0-9]*/minSdk 21/g' build.gradle
+
+            CURRENT_CS=$(grep -oE 'compileSdk[[:space:]]+[0-9]+' build.gradle | grep -oE '[0-9]+' | head -n1 || echo 0)
+            if [ "$CURRENT_CS" -gt 0 ] && [ "$CURRENT_CS" -lt 35 ]; then
+              sed -i 's/compileSdk[[:space:]]*[0-9]*/compileSdk 35/g' build.gradle
+            fi
+            CURRENT_TS=$(grep -oE 'targetSdk[[:space:]]+[0-9]+' build.gradle | grep -oE '[0-9]+' | head -n1 || echo 0)
+            if [ "$CURRENT_TS" -gt 0 ] && [ "$CURRENT_TS" -lt 34 ]; then
+              sed -i 's/targetSdk[[:space:]]*[0-9]*/targetSdk 34/g' build.gradle
+            fi
+            CURRENT_MS=$(grep -oE 'minSdk[[:space:]]+[0-9]+' build.gradle | grep -oE '[0-9]+' | head -n1 || echo 0)
+            if [ "$CURRENT_MS" -gt 0 ] && [ "$CURRENT_MS" -lt 16 ]; then
+              sed -i 's/minSdk[[:space:]]*[0-9]*/minSdk 21/g' build.gradle
+            fi
+
+            if grep -q 'ndkVersion' build.gradle; then
+              echo "  ndkVersion found → REMOVING"
+              sed -i '/ndkVersion/d' build.gradle
+            fi
+
             sed -i 's|sourceCompatibility[[:space:]]*JavaVersion\.VERSION_[0-9]*|sourceCompatibility JavaVersion.VERSION_17|g' build.gradle
             sed -i 's|targetCompatibility[[:space:]]*JavaVersion\.VERSION_[0-9]*|targetCompatibility JavaVersion.VERSION_17|g' build.gradle
-            sed -i 's|storeFile[[:space:]]*file(".*")|storeFile file("release.keystore")|g' build.gradle
-            sed -i 's|storePassword[[:space:]]*".*"|storePassword "password"|g' build.gradle
-            sed -i 's|keyAlias[[:space:]]*".*"|keyAlias "release"|g' build.gradle
-            sed -i 's|keyPassword[[:space:]]*".*"|keyPassword "password"|g' build.gradle
+
+            if grep -q 'storeFile.*file(' build.gradle; then
+              sed -i 's|storeFile[[:space:]]*file(".*")|storeFile file("release.keystore")|g' build.gradle
+              sed -i 's|storePassword[[:space:]]*".*"|storePassword "password"|g' build.gradle
+              sed -i 's|keyAlias[[:space:]]*".*"|keyAlias "release"|g' build.gradle
+              sed -i 's|keyPassword[[:space:]]*".*"|keyPassword "password"|g' build.gradle
+            fi
           else
             echo "⚠️ build.gradle / build.gradle.kts tidak ditemukan di android/app/"
             ls -la
           fi
 
-          # gradle.properties — JVM heap + AndroidX
+          # gradle.properties — JVM heap + AndroidX (append if missing)
           PROPS="../gradle.properties"
           if [ -f "$PROPS" ]; then
-            grep -q 'org.gradle.jvmargs' "$PROPS" || echo 'org.gradle.jvmargs=-Xmx2g' >> "$PROPS"
+            grep -q 'org.gradle.jvmargs' "$PROPS" || echo 'org.gradle.jvmargs=-Xmx4g' >> "$PROPS"
             grep -q 'android.useAndroidX' "$PROPS" || echo 'android.useAndroidX=true' >> "$PROPS"
             grep -q 'android.enableJetifier' "$PROPS" || echo 'android.enableJetifier=true' >> "$PROPS"
           fi
