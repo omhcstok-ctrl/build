@@ -1012,7 +1012,7 @@ jobs:
         id: flutter_detect
         shell: bash
         run: |
-          set -e
+          # v3.3.5: NO set -e — grep can return non-zero when patterns dont match
           PUBSPEC="flutter-project/pubspec.yaml"
 
           SDK_LINE=$(grep -A2 '^environment:' "$PUBSPEC" | grep 'sdk:' | head -n1 | sed 's/.*sdk:[[:space:]]*//; s/["'"'"']//g' || true)
@@ -1020,15 +1020,15 @@ jobs:
 
           DART_VERSION=""
           if echo "$SDK_LINE" | grep -qE '>='; then
-            DART_VERSION=$(echo "$SDK_LINE" | grep -oE '>=[[:space:]]*[0-9]+\.[0-9]+' | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -n1)
+            DART_VERSION=$(echo "$SDK_LINE" | grep -oE '>=[[:space:]]*[0-9]+\.[0-9]+' | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -n1 || true)
           elif echo "$SDK_LINE" | grep -qE '\^'; then
-            DART_VERSION=$(echo "$SDK_LINE" | grep -oE '\^[[:space:]]*[0-9]+\.[0-9]+' | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -n1)
+            DART_VERSION=$(echo "$SDK_LINE" | grep -oE '\^[[:space:]]*[0-9]+\.[0-9]+' | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -n1 || true)
           else
-            DART_VERSION=$(echo "$SDK_LINE" | grep -oE '[0-9]+\.[0-9]+' | head -n1)
+            DART_VERSION=$(echo "$SDK_LINE" | grep -oE '[0-9]+\.[0-9]+' | head -n1 || true)
           fi
           echo "Extracted Dart version (min): $DART_VERSION"
 
-          UPPER_BOUND=$(echo "$SDK_LINE" | grep -oE '<[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+' | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+          UPPER_BOUND=$(echo "$SDK_LINE" | grep -oE '<[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+' | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
           echo "Extracted upper bound: ${UPPER_BOUND:-none}"
 
           FLUTTER_VERSION="3.35.2"
@@ -1056,52 +1056,58 @@ jobs:
           fi
 
           # Plugin-based overrides
-          if grep -Eq 'flutter_lints:[[:space:]]*(\^|>=)?[5-9]\.' "$PUBSPEC"; then
+          if grep -Eq 'flutter_lints:[[:space:]]*(\^|>=)?[5-9]\.' "$PUBSPEC" 2>/dev/null; then
             FLUTTER_VERSION="3.35.2"
           fi
-          if grep -Eq '^[[:space:]]*lints:[[:space:]]*(\^|>=)?[5-9]\.' "$PUBSPEC"; then
+          if grep -Eq '^[[:space:]]*lints:[[:space:]]*(\^|>=)?[5-9]\.' "$PUBSPEC" 2>/dev/null; then
             FLUTTER_VERSION="3.35.2"
           fi
-          if grep -Eq 'very_good_analysis:[[:space:]]*(\^|>=)?[7-9]\.' "$PUBSPEC"; then
+          if grep -Eq 'very_good_analysis:[[:space:]]*(\^|>=)?[7-9]\.' "$PUBSPEC" 2>/dev/null; then
             FLUTTER_VERSION="3.35.2"
           fi
-          if grep -Eq 'webview_flutter:[[:space:]]*(\^|>=)?4\.(1[5-9]|[2-9][0-9])' "$PUBSPEC" || \
-             grep -Eq 'webview_flutter:[[:space:]]*(\^|>=)?5\.' "$PUBSPEC"; then
+          if grep -Eq 'webview_flutter:[[:space:]]*(\^|>=)?4\.(1[5-9]|[2-9][0-9])' "$PUBSPEC" 2>/dev/null || \
+             grep -Eq 'webview_flutter:[[:space:]]*(\^|>=)?5\.' "$PUBSPEC" 2>/dev/null; then
             FLUTTER_VERSION="3.35.2"
           fi
-          if grep -Eq 'geolocator:[[:space:]]*(\^|>=)?(14|15)\.' "$PUBSPEC"; then
+          if grep -Eq 'geolocator:[[:space:]]*(\^|>=)?(14|15)\.' "$PUBSPEC" 2>/dev/null; then
             FLUTTER_VERSION="3.35.2"
           fi
-          if grep -Eq 'google_maps_flutter:[[:space:]]*(\^|>=)?2\.(1[0-9]|[2-9][0-9])' "$PUBSPEC" || \
-             grep -Eq 'google_maps_flutter:[[:space:]]*(\^|>=)?3\.' "$PUBSPEC"; then
+          if grep -Eq 'google_maps_flutter:[[:space:]]*(\^|>=)?2\.(1[0-9]|[2-9][0-9])' "$PUBSPEC" 2>/dev/null || \
+             grep -Eq 'google_maps_flutter:[[:space:]]*(\^|>=)?3\.' "$PUBSPEC" 2>/dev/null; then
             FLUTTER_VERSION="3.35.2"
           fi
-          if grep -Eq 'firebase_core:[[:space:]]*(\^|>=)?3\.' "$PUBSPEC" || \
-             grep -Eq 'firebase_[a-z_]+:[[:space:]]*(\^|>=)?3\.' "$PUBSPEC"; then
+          if grep -Eq 'firebase_core:[[:space:]]*(\^|>=)?3\.' "$PUBSPEC" 2>/dev/null || \
+             grep -Eq 'firebase_[a-z_]+:[[:space:]]*(\^|>=)?3\.' "$PUBSPEC" 2>/dev/null; then
             FLUTTER_VERSION="3.35.2"
           fi
-          if grep -Eq 'flutter_local_notifications:[[:space:]]*(\^|>=)?(17|18)\.' "$PUBSPEC"; then
+          if grep -Eq 'flutter_local_notifications:[[:space:]]*(\^|>=)?(17|18)\.' "$PUBSPEC" 2>/dev/null; then
             FLUTTER_VERSION="3.35.2"
           fi
-          if grep -Eq 'workmanager:[[:space:]]*(\^|>=)?0\.(6|[7-9])' "$PUBSPEC"; then
+          if grep -Eq 'workmanager:[[:space:]]*(\^|>=)?0\.(6|[7-9])' "$PUBSPEC" 2>/dev/null; then
             FLUTTER_VERSION="3.35.2"
           fi
-          if grep -Eq 'image_picker:[[:space:]]*(\^|>=)?1\.(2[0-9]|[3-9][0-9])' "$PUBSPEC"; then
+          if grep -Eq 'image_picker:[[:space:]]*(\^|>=)?1\.(2[0-9]|[3-9][0-9])' "$PUBSPEC" 2>/dev/null; then
             FLUTTER_VERSION="3.35.2"
           fi
-          if grep -Eq 'file_picker:[[:space:]]*(\^|>=)?(8|9)\.' "$PUBSPEC"; then
+          if grep -Eq 'file_picker:[[:space:]]*(\^|>=)?(8|9)\.' "$PUBSPEC" 2>/dev/null; then
             FLUTTER_VERSION="3.35.2"
           fi
-          if grep -Eq 'permission_handler:[[:space:]]*(\^|>=)?(12|13)\.' "$PUBSPEC"; then
+          if grep -Eq 'permission_handler:[[:space:]]*(\^|>=)?(12|13)\.' "$PUBSPEC" 2>/dev/null; then
             FLUTTER_VERSION="3.35.2"
           fi
-          if grep -Eq 'flutter_sound:[[:space:]]*(\^|>=)?9\.([1-9][0-9])' "$PUBSPEC"; then
+          if grep -Eq 'flutter_sound:[[:space:]]*(\^|>=)?9\.([1-9][0-9])' "$PUBSPEC" 2>/dev/null; then
             if [ "$FLUTTER_VERSION" \< "3.27.0" ] 2>/dev/null; then FLUTTER_VERSION="3.27.0"; fi
+          fi
+
+          # v3.3.5: SAFETY NET — if FLUTTER_VERSION is empty for any reason
+          if [ -z "$FLUTTER_VERSION" ]; then
+            FLUTTER_VERSION="3.35.2"
+            echo "⚠️ FLUTTER_VERSION was empty — defaulting to 3.35.2"
           fi
 
           echo "FLUTTER_VERSION=$FLUTTER_VERSION" >> $GITHUB_ENV
           echo "flutter_version=$FLUTTER_VERSION" >> $GITHUB_OUTPUT
-          echo "Final Flutter version: $FLUTTER_VERSION"
+          echo "Final Flutter version: $FLUTTER_VERSION (Dart SDK: ${SDK_LINE:-none}, Dart min: ${DART_VERSION:-unknown})"
 
       - name: Setup Flutter SDK
         if: env.type == 'flutter'
